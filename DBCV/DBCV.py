@@ -5,6 +5,7 @@ from itertools import compress
 from scipy.spatial.distance import pdist
 from hdbscan._hdbscan_linkage import mst_linkage_core
 from scipy.spatial import cKDTree
+from joblib import Parallel, delayed
 
 import numpy.typing as npt
 from typing import List, Tuple, Optional
@@ -15,12 +16,11 @@ _NOT_ENOUGH_CLUSTERS = -2
 _ALL_NOISE = -1
 _SUCCESS = 0
 EXIT = {
-    -1: "All points assigned to noise.",
-    -2: "Not enough clusters: must have at least two."
+    _ALL_NOISE: "All points assigned to noise.",
+    _NOT_ENOUGH_CLUSTERS: "Not enough clusters: must have at least two.",
 }
 
 # default dtypes
-INT_DTYPE = np.int32
 FLOAT_DTYPE = np.float64
 IDX_DTYPE = np.intp
 
@@ -31,7 +31,8 @@ def DBCV_score(
         labels: npt.NDArray[np.integer],
         *,
         ind_clust_scores: bool = False,
-    ) -> Optional[Tuple[float, Optional[List[float]]]]:
+        **kwargs_parallel
+    ) -> Optional[Tuple[float, Optional[npt.NDArray[np.floating]]]]:
     """
     Compute the aggregate DBCV score and, optionally, individual cluster scores for the given coordinates and cluster labels.
     [see, `intracluster_analysis()` & `intercluster_analysis()` for details.]
@@ -47,19 +48,20 @@ def DBCV_score(
 
     labels : npt.NDArray[np.integer]
         1-D array of cluster labels with shape (n,), corresponding to the rows of X. 
-        Noise points must be labelled -1.
+        NOTE : Noise points must be labelled -1.
 
     ind_clust_scores : bool, default=False
         If True, return the individual DBCV score for each cluster in addition to the aggregate DBCV score. 
         If False, only the aggregate DBCV score is returned and the second return value is None.
 
+    kwargs_parallel : parameters to pass to the `joblib.Parallel(...)`.
 
     Returns
     -------
     tuple or None
         On success, returns:
             - float: Aggregate DBCV score.
-            - list of float or None: Individual cluster scores if `ind_clust_scores=True`, otherwise None.
+            - npt.NDArray[np.floating] or None: Individual cluster scores if `ind_clust_scores=True`, otherwise None.
 
         Returns None if the data cannot be scored.
 
@@ -68,7 +70,9 @@ def DBCV_score(
               
     """
 
-    # Format the data to make clusters contiguous
+    X, labels = np.asarray(X), np.asarray(labels)
+
+    ## Format the data to make clusters contiguous
     (
         status, 
         cluster_sort, cluster_groups, cluster_bounds, 
@@ -81,16 +85,17 @@ def DBCV_score(
         print(EXIT[status])
         return None
 
-    # Sparseness calculation and find core points
+    ## Sparseness calculation and find core points
     (
         sparseness,
         core_pts, core_dists_arr
     ) = intracluster_analysis(
         N_clust, d, cluster_groups,
+        **kwargs_parallel
     )
     print("Intra-Cluster Analysis : SUCCESS ✓")
     
-    # Format core points for intercluster analysis        
+    ## Format core points for intercluster analysis        
     (
         core_cluster_sort, 
         core_cluster_groups, core_cluster_bounds
@@ -98,18 +103,19 @@ def DBCV_score(
         cluster_sort, cluster_bounds, core_pts,
     )
 
-    # Separation calculation
+    ## Separation calculation
     separation = intercluster_analysis(
         N_clust, d,
         core_cluster_sort, core_cluster_groups, core_cluster_bounds,
         core_dists_arr,
+        **kwargs_parallel
     )
     print("Inter-Cluster Analysis : SUCCESS ✓")
 
     print("Scoring ....")
-    # Compute individual and aggregate DBCV scores
+    ## Compute individual and aggregate DBCV scores
     return _weighted_score(
-        n_samp, N_clust,
+        n_samp,
         sparseness, separation,
         cluster_bounds,
         ind_clust_scores,
@@ -117,12 +123,12 @@ def DBCV_score(
 
 
 def _weighted_score(
-    n_samp: int, N_clust: int,
-    sparseness: npt.NDArray[np.floating],
-    separation: npt.NDArray[np.floating],
-    cluster_bounds: npt.NDArray[np.integer],
-    ind_clust_scores: bool = False,
-) -> Tuple[float, Optional[List[float]]]:
+        n_samp: int,
+        sparseness: npt.NDArray[np.floating],
+        separation: npt.NDArray[np.floating],
+        cluster_bounds: npt.NDArray[np.integer],
+        ind_clust_scores: bool = False,
+    ) -> Tuple[float, Optional[npt.NDArray[np.floating]]]:
     """
     Performs weighted averaging of individual cluster scores to yield the aggregate DBCV score
     according to the definitions in Moulavi et al.
@@ -130,15 +136,15 @@ def _weighted_score(
     Optionally returns individual scores if desired.
     """
 
-    cluster_score_set = (
+    cluster_scores = (
         (separation - sparseness) /
         np.maximum(separation, sparseness)
     )
-    DBCV_val = (np.diff(cluster_bounds) / n_samp) * cluster_score_set
+    DBCV_val = np.sum((np.diff(cluster_bounds) / n_samp) * cluster_scores)
 
     return ( 
-        DBCV_val, 
-        cluster_score_set if ind_clust_scores else None
+        DBCV_val.item(), 
+        cluster_scores if ind_clust_scores else None
     )
 
 
@@ -150,6 +156,7 @@ def _weighted_score(
 def intracluster_analysis(
         N_clust: int, d: int,
         cluster_groups: List[npt.NDArray[np.floating]],
+        **kwargs_parallel
     ) -> Tuple[
         npt.NDArray[np.floating],
         List[npt.NDArray[np.integer]],
@@ -169,7 +176,7 @@ def intracluster_analysis(
         The dimensionality of the data.
 
     cluster_groups : List[npt.NDArray[np.floating]]
-        List of [coordinates | labels] arrays containing the observations belonging to each non-noise cluster.
+        List of coordinates arrays containing the observations belonging to each non-noise cluster.
         [see, `_format_data()` for details.]
 
 
@@ -195,11 +202,9 @@ def intracluster_analysis(
     core_pts = []
 
     for id, cluster in enumerate(cluster_groups):
-        data = cluster[:, :d]
-
         # pairwise distances 
         intra_clust_matrix_condensed = pdist(
-            data,
+            cluster,
             metric="euclidean",
         )
 
@@ -225,7 +230,7 @@ def intracluster_analysis(
 
     # Combine the list of core-distance arrays for each cluster into a single array,
     # while maintaining the cluster order.
-    core_dists_arr = np.concat(core_dists_arr, dtype=FLOAT_DTYPE,)
+    core_dists_arr = np.concat(core_dists_arr, dtype=FLOAT_DTYPE)
 
     return (
         sparseness,
@@ -236,9 +241,9 @@ def intracluster_analysis(
 
 @njit(cache=True)
 def APCD(
-    distance_matrix_condensed: npt.NDArray[np.floating],
-    d: int,
-) -> npt.NDArray[np.floating]:
+        dist_matrix_condensed: npt.NDArray[np.floating],
+        d: int,
+    ) -> npt.NDArray[np.floating]:
     """
     Computes the all-points core distance according to the DBCV definition.
 
@@ -254,8 +259,8 @@ def APCD(
     # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
     # instead of materializing an n×n distance matrix.
     p = - d
-    n = 0.5 * (1 + sqrt(1 + 8 * distance_matrix_condensed.size)) # quadratic eqn: size = n(n-1)/2
-    all_pts_core_dists = np.zeros(n, dtype=distance_matrix_condensed.dtype)
+    n = int(0.5 * (1 + sqrt(1 + 8 * len(dist_matrix_condensed)))) # quadratic eqn: condensed_size = n(n-1)/2
+    all_pts_core_dists = np.zeros(n, dtype=dist_matrix_condensed.dtype)
 
     # pdist() stores the upper-triangular pairwise distances in the row-major ordering:
     #   (0,1), (0,2), ..., (0,n-1), (1,2), ..., (1,n-1), ..., (n-2,n-1).
@@ -263,7 +268,7 @@ def APCD(
     idx = 0
     for i in range(n - 1): # row id
         for j in range(i + 1, n):  # upper-triangular column id
-            w = (distance_matrix_condensed[idx] ** p) 
+            w = (dist_matrix_condensed[idx] ** p) 
             all_pts_core_dists[i] += w
             all_pts_core_dists[j] += w
 
@@ -278,9 +283,9 @@ def APCD(
 
 @njit(cache=True)
 def MRD(
-    distance_matrix_condensed: npt.NDArray[np.floating],
-    all_pts_core_dists: npt.NDArray[np.floating],
-) -> npt.NDArray[np.floating]:
+        dist_matrix_condensed: npt.NDArray[np.floating],
+        all_pts_core_dists: npt.NDArray[np.floating],
+    ) -> npt.NDArray[np.floating]:
     """
     Constructs mutual-reachability distances.
 
@@ -290,21 +295,21 @@ def MRD(
         core(j)
     )
     """
-    n = all_pts_core_dists.shape[0]
+    n = len(all_pts_core_dists)
 
     # Optimization: construct MRD(i, j) directly from the condensed pdist() ordering. 
     # This applies the maximum operation only to the n(n-1)/2 distance-core tuples,
     # without first materializing an n×n distance matrix.
     result = np.zeros(
         (n, n),
-        dtype=distance_matrix_condensed.dtype,
+        dtype=dist_matrix_condensed.dtype,
     )
 
     idx = 0
     for i in range(n - 1): # row id
         for j in range(i + 1, n):  # upper-triangular column id
             mrd = max(
-                distance_matrix_condensed[idx],
+                dist_matrix_condensed[idx],
                 all_pts_core_dists[i],
                 all_pts_core_dists[j],
             )
@@ -317,8 +322,8 @@ def MRD(
 
 
 def _MST_builder_HDBSCAN(
-    MRD_matrix: npt.NDArray[np.floating],
-) -> Tuple[float, npt.NDArray[np.integer]]:
+        MRD_matrix: npt.NDArray[np.floating],
+    ) -> Tuple[float, npt.NDArray[np.integer]]:
     """
     Helper function for intracluster_analysis() 
     that identifies core points based on the all points core distance, 
@@ -331,7 +336,9 @@ def _MST_builder_HDBSCAN(
     # (MRD graph is complete and already represented as a dense distance matrix) 
     mst = mst_linkage_core(MRD_matrix)
 
-    # mst has n - 1 rows and 3 columns (from, to, weight)
+    # MST has n - 1 rows and 3 columns: (from, to, weight). 
+    # Source-node reconstruction is no longer required.
+    # [see HDBSCAN commit 7b2f0e0dcff6ef99b0c976d1471cbeec99da49a9]
     nodes = mst[:, :-1].astype(IDX_DTYPE)
     edges = mst[:, -1]
 
@@ -364,12 +371,13 @@ def _MST_builder_HDBSCAN(
 # Density Separation of a Pair of Clusters (DSPC)
 ## =======================================================
 def intercluster_analysis(
-    N_clust: int, d: int,
-    core_cluster_sort: npt.NDArray[np.floating],
-    core_cluster_groups: List[npt.NDArray[np.floating]],
-    core_cluster_bounds: npt.NDArray[np.integer],
-    core_dists_arr: npt.NDArray[np.floating],
-) -> npt.NDArray[np.floating]:
+        N_clust: int, d: int,
+        core_cluster_sort: npt.NDArray[np.floating],
+        core_cluster_groups: List[npt.NDArray[np.floating]],
+        core_cluster_bounds: npt.NDArray[np.integer],
+        core_dists_arr: npt.NDArray[np.floating],
+        **kwargs_parallel
+    ) -> npt.NDArray[np.floating]:
     """
     Computes the separation value for each cluster according to the definitions in Moulavi et al.
 
@@ -383,10 +391,10 @@ def intercluster_analysis(
         The dimensionality of the data.
 
     core_cluster_sort : npt.NDArray[np.floating]
-        2-D master array containing [coordinates | labels] for all core points, sorted by cluster label.
+        2-D master array containing coordinates for all core points, sorted by cluster label.
 
     core_cluster_groups : List[npt.NDArray[np.floating]]
-        List of [coordinates | labels] arrays containing the core points belonging to each non-noise cluster.
+        List of coordinates arrays containing the core points belonging to each non-noise cluster.
 
     core_cluster_bounds : npt.NDArray[np.integer]
         1-D array of cluster boundaries for slicing core points master array.
@@ -408,14 +416,10 @@ def intercluster_analysis(
     separation = np.empty(N_clust, dtype=FLOAT_DTYPE)
 
     # all core-points
-    data_core = core_cluster_sort[:, :d]
-    Tree = cKDTree(data_core)
+    Tree = cKDTree(core_cluster_sort)
 
     for id, cluster in enumerate(core_cluster_groups):
-        # core-points from current label 
-        data = cluster[:, :d]
-
-        # [start,end) corresponds to core_cluster_sort
+        # [start,end) corresponds to current label in core_cluster_sort
         start, end = core_cluster_bounds[id], core_cluster_bounds[id + 1]
         cluster_core_size = end - start 
         rows = np.arange(cluster_core_size)
@@ -423,7 +427,7 @@ def intercluster_analysis(
 
         # k is chosen such that each query must return atleast one neighbor with different cluster label
         NN_dists, NN_indices = Tree.query(
-            data, 
+            cluster, 
             k=cluster_core_size + 1,
         )
 
@@ -456,12 +460,12 @@ def intercluster_analysis(
             axis=-1, dtype=FLOAT_DTYPE,
         )
         MRD_component = MRD_arr.argmax(axis=1)
-        # Optimization: avoid computing max and argmax simultaneously; use argmax to get max.
-        MRD_NN_Edist = MRD_arr[rows, MRD_component]
 
+        # Optimization: avoid computing max and argmax simultaneously; use argmax to get max.
+        #
         # Use the minimum MRD among the nearest (euclidean distance) outside-cluster neighbours
         # as the initial estimate of cluster separation.
-        init_separation = MRD_NN_Edist.min()
+        init_separation = MRD_arr[rows, MRD_component].min()
 
         # Identify points requiring the radial check.
         # We shorlisted outer-core point j by euclidean distance d_ij, for each inner-core point i.
@@ -501,7 +505,7 @@ def intercluster_analysis(
         neighbors_new = []
         for i, k in zip(check_radially, radial_check):
             l = len(k)
-            if not l : pass # skip where no neighbors found in radial check
+            if not l : continue # skip where no neighbors found in radial check
 
             neighbors_new.extend(k)
             query.extend(l * [i])
@@ -522,7 +526,7 @@ def intercluster_analysis(
             (
                 # euclidean distance
                 np.linalg.norm(
-                    data[query] - data_core[neighbors_new],
+                    cluster[query] - core_cluster_sort[neighbors_new],
                     axis=1,
                 ),
                 # inner core distance
@@ -580,21 +584,21 @@ def _format_data(
             Status code: 0 = _SUCCESS, -1 = _ALL_NOISE, -2 = _NOT_ENOUGH_CLUSTERS.
 
         - Optional[npt.NDArray[np.floating]]:
-            2-D master array containing [coordinates | labels] for all non-noise observations, sorted by cluster label.
-            Shape: (N, d + 1), 
+            2-D master array containing coordinates for all non-noise observations, sorted by cluster label.
+            Shape: (N, d), 
             where N is the number of non-noise observations and d is the dimensionality of the feature space.
 
         - Optional[List[npt.NDArray[np.floating]]]:
-            List of [coordinates | labels] arrays, containing the observations belonging to each non-noise cluster. 
+            List of coordinates arrays, containing the observations belonging to each non-noise cluster. 
             Clusters are ordered according to their sorted labels.
 
         - Optional[npt.NDArray[np.integer]]:
             1-D array of cluster boundaries for slicing the sorted master array. 
-                [0, start_index_1, ..., start_index_last, N]
+                [0, start_index_1, start_index_2, ..., start_index_last, N]
             Boundaries follow Python's [start, end) convention.
                 
         - int:
-            Total number of observations, including noise observations.
+            Total number of observations (including noise).
 
         - int:
             Dimensionality of the feature space.
@@ -604,16 +608,16 @@ def _format_data(
 
     """
     n_samp, d = X.shape
-    Xl = np.hstack(
-        (X, labels[:, None]), 
-        dtype=FLOAT_DTYPE,
-    )
 
+    # Optimization: avoid hstack([X, labels]) as it allocates new memory,
+    # which is wasteful for large X.
+    # Work on existing X and labels: WITH CAUTION - No Mutation.
+    # The final label information is fully recoverable from cluster_bounds.
     (
         status, 
-        Xl, 
+        X, labels,
         cluster_bounds, noise_end
-    ) = _make_clusters_contiguous(Xl)
+    ) = _make_clusters_contiguous(X, labels)
 
     if status != _SUCCESS : return (status, None, None, None, 0, 0, 0)
 
@@ -626,30 +630,33 @@ def _format_data(
     small_clusters = (cluster_sizes < 3)
 
     if small_clusters.any():
-        for id in np.flatnonzero(small_clusters) :
+        for id in np.flatnonzero(small_clusters):
             cluster = slice(
                 cluster_bounds[id],
                 cluster_bounds[id + 1],
             )
 
-            Xl[cluster, d] = -1
+            labels[cluster] = -1
 
         (
             status, 
-            Xl, 
+            X, labels,
             cluster_bounds, noise_end
-        ) = _make_clusters_contiguous(Xl)
+        ) = _make_clusters_contiguous(X, labels)
 
         if status != _SUCCESS : return (status, None, None, None, 0, 0, 0)
 
-    # Remove the noise group from the data ; accordingly adjust the indices.
+    # Remove the noise group from the data,
+    # and accordingly adjust the indices.
     if noise_end: 
-        cluster_sort = Xl[noise_end:]
+        cluster_sort = X[noise_end:]
         cluster_bounds -= noise_end
     else:
-        cluster_sort = Xl
+        cluster_sort = X
 
-    # cluster_bounds is of len (N_clust + 1), where first & last elements are first & last row id of cluster_sort.
+    # cluster_bounds is of len (N_clust + 1):
+    #   [0, start_index_1, start_index_2, ..., start_index_last, N]
+    # where first & last elements are first & last row id of cluster_sort.
     # Use the intermediate points to splits the data in N_clust groups.
     cluster_groups = np.vsplit(
         cluster_sort,
@@ -666,60 +673,67 @@ def _format_data(
 
 
 def _make_clusters_contiguous(
-        Xl: npt.NDArray[np.floating],
+        X: npt.NDArray[np.floating],
+        labels: npt.NDArray[np.integer],
     ) -> Tuple[
         int,
         Optional[npt.NDArray[np.floating]],
         Optional[npt.NDArray[np.integer]],
+        Optional[npt.NDArray[np.integer]],
         int
     ]:
     """
-    Sort [Data | Label] by increasing order of Label.
+    Sort Data by increasing order of Labels.
 
     """
-    n_samp = Xl.shape[0]
-    labels = Xl[:, -1]
-    
     # Check: if all data is noise.
     if np.all(labels == -1):
-        return _ALL_NOISE, None, None, 0
+        return _ALL_NOISE, None, None, None, 0
+
+    # count labels 
+    unique, n_labels = np.unique(
+        labels,
+        return_counts=True, sorted=True,
+    )
+    has_noise = (unique[0] == -1)
 
     # Check: if fewer than two non-noise clusters.
-    if np.count_nonzero(np.unique(labels) != -1) < 2:
-        return _NOT_ENOUGH_CLUSTERS, None, None, 0
+    if len(unique) - has_noise < 2:
+        return _NOT_ENOUGH_CLUSTERS, None, None, None, 0
 
-    # Sort the [coordinate|label] matrix by cluster label.
-    Xl_sort = Xl[labels.argsort()]
-    labels_sorted = Xl_sort[:, -1]
+    # Sort the arrays by cluster label.
+    sort_order = labels.argsort()
+    X_sorted, labels_sorted = X[sort_order], labels[sort_order]
 
-    # [0, start_index_1, start_index_2, ..., start_index_last, end_index_last + 1]
-    cluster_ID_split = np.flatnonzero(
-        labels_sorted[1:] != labels_sorted[:-1]
-    ) + 1
-    cluster_bounds = np.concat(
-        ([0], cluster_ID_split, [n_samp]),
-        dtype=IDX_DTYPE,
-    )
+    # Sorting the labels does not change their counts.
+    # If n_labels[0] = 5, n_labels[1] = 11, n_labels[2] = 4,
+    # then in the sorted array :
+    #   unique[0] belongs to rows [0, 5)
+    #   unique[1] belongs to rows 5 + [0, 11)
+    #   unique[2] belongs to rows 5 + 11 + [0, 4)
+    cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
+    cluster_bounds[0] = 0
+    np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
 
     # Check: data contains noise observations (-1 labels) or not.
     # if noise exists, it will be the very first cluster in the sorted output.
-    if np.any(labels == -1):
+    if has_noise:
         noise_end = cluster_bounds[1]
         cluster_bounds = cluster_bounds[1:]
     else : noise_end = 0
 
-    return _SUCCESS, Xl_sort, cluster_bounds, noise_end
+    return _SUCCESS, X_sorted, labels_sorted, cluster_bounds, noise_end
 
 
 def _format_core_points(
-    cluster_sort: npt.NDArray[np.floating],
-    cluster_bounds: npt.NDArray[np.integer],
-    core_pts: List[npt.NDArray[np.integer]]
-) -> Tuple[
-    npt.NDArray[np.floating],
-    List[npt.NDArray[np.floating]],
-    npt.NDArray[np.integer]
-]:
+        cluster_sort: npt.NDArray[np.floating],
+        cluster_bounds: npt.NDArray[np.integer],
+        core_pts: List[npt.NDArray[np.integer]]
+    ) -> Tuple[
+        npt.NDArray[np.floating],
+        List[npt.NDArray[np.floating]],
+        npt.NDArray[np.integer]
+    ]:
     """
     Formats core points for intercluster_analysis().
 
@@ -727,34 +741,36 @@ def _format_core_points(
     [see, intracluster_analysis(...) for core_pts.]
 
     """
+    core_idx = []
+    core_cluster_bounds = np.empty(len(core_pts) + 1, dtype=IDX_DTYPE)
+    core_cluster_bounds[0] = 0
+
     # Convert cluster-level core_pts indices to global cluster_sort indices.
     # e.g.-
     #   Within cluster-3 the core points are at position array([2,5,8]),
     #   and the index-range for cluster-3 is [20,35).
     #   Then globally array([2,5,8]) + 20 = array([22,25,28]) rows are core points.
-    core_idx = np.concat(
-        [
-            pts + cluster_bounds[i]
-            for i, pts in enumerate(core_pts)
-        ], dtype=IDX_DTYPE,
-    )
+    for id, pts in enumerate(core_pts):
+        core_cluster_bounds[id + 1] = len(pts) 
+        core_idx.append(
+            pts + cluster_bounds[id]
+        )
 
-    # Extract the core-point rows [coordinate|label] from the sorted master array.
-    core_cluster_sort = cluster_sort[core_idx]
-
-    # Split core-point coordinates by cluster labels.
-    cluster_ID_split = np.flatnonzero(
-        core_cluster_sort[1:, -1] != core_cluster_sort[:-1, -1]
-    ) + 1
-    core_cluster_groups = np.vsplit(
-        core_cluster_sort,
-        cluster_ID_split,
-    )
+    # Extract the core-point rows from the sorted master array.
+    core_cluster_sort = cluster_sort[
+        np.concat(core_idx, dtype=IDX_DTYPE)
+    ]
 
     # [0, core_start_index_1, core_start_index_2, ..., core_start_index_last, core_end_index_last + 1]
-    core_cluster_bounds = np.concat(
-        ([0], cluster_ID_split, [core_cluster_sort.shape[0]]),
+    core_cluster_bounds = np.cumsum(
+        core_cluster_bounds,
         dtype=IDX_DTYPE,
+    )
+
+    # Split core-point rows by cluster labels.
+    core_cluster_groups = np.vsplit(
+        core_cluster_sort,
+        core_cluster_bounds[1: -1],
     )
 
     return (
