@@ -10,14 +10,17 @@ from joblib import Parallel, delayed
 import numpy.typing as npt
 from typing import List, Tuple, Optional
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 # Flags indicating possible scoring outcomes
 _NOT_ENOUGH_CLUSTERS = -2
 _ALL_NOISE = -1
 _SUCCESS = 0
 EXIT = {
-    _ALL_NOISE: "All points assigned to noise.",
-    _NOT_ENOUGH_CLUSTERS: "Not enough clusters: must have at least two.",
+    _ALL_NOISE: "⚠ All points assigned to noise.",
+    _NOT_ENOUGH_CLUSTERS: "⚠ Not enough clusters: must have at least two.",
 }
 
 # default dtypes
@@ -31,7 +34,7 @@ def DBCV_score(
         labels: npt.NDArray[np.integer],
         *,
         ind_clust_scores: bool = False,
-        **kwargs_parallel
+        n_jobs: int = 1,
     ) -> Optional[Tuple[float, Optional[npt.NDArray[np.floating]]]]:
     """
     Compute the aggregate DBCV score and, optionally, individual cluster scores for the given coordinates and cluster labels.
@@ -40,6 +43,7 @@ def DBCV_score(
     Ref: "Moulavi, D., Jaskowiak, P. A., Campello, R. J. G. B., Zimek, A. & Sander, J. Density-based clustering validation. SIAM Int. Conf. Data Min. 2014, SDM 2014 2, 839-847 (2014)"
     https://www.researchgate.net/publication/260333211_Density-Based_Clustering_Validation
     
+
     Parameters
     ----------
     X : npt.NDArray[np.floating]
@@ -48,25 +52,40 @@ def DBCV_score(
 
     labels : npt.NDArray[np.integer]
         1-D array of cluster labels with shape (n,), corresponding to the rows of X. 
-        NOTE : Noise points must be labelled -1.
+        NOTE : 
+            Noise points must be labelled -1.
+            Any cluster having size < 3 will be relabelled as noise (see, https://rdrr.io/cran/dbscan/src/R/dbcv.R).
 
     ind_clust_scores : bool, default=False
         If True, return the individual DBCV score for each cluster in addition to the aggregate DBCV score. 
         If False, only the aggregate DBCV score is returned and the second return value is None.
 
-    kwargs_parallel : parameters to pass to the `joblib.Parallel(...)`.
+    n_jobs : parameters to pass to the `joblib.Parallel(...)`.
 
+    
     Returns
     -------
     tuple or None
         On success, returns:
             - float: Aggregate DBCV score.
-            - npt.NDArray[np.floating] or None: Individual cluster scores if `ind_clust_scores=True`, otherwise None.
+            - npt.NDArray[np.floating] or None: 
+                If `ind_clust_scores=True`, individual cluster scores are returned.
+                The scores are sorted by cluster labels, not in original observed order.
+                If `ind_clust_scores=False`, returns None.
 
-        Returns None if the data cannot be scored.
+        Returns None if the data cannot be scored, due to not having enough non-noise clusters.
 
+        
+    EDGE CASES
+    ----------
+    For a cluster i,
+    separation > 0, sparseness = 0 : cluster_scores[i] = +1 ; heuristically the best case
+    separation = 0, sparseness > 0 : cluster_scores[i] = -1 ; heuristically the worst case
 
-    CODE INSPIRATION : https://github.com/Kaufman-Lab-Columbia/k-DBCV
+    separation = 0, sparseness = 0 : cluster_scores[i] not defined in the original paper by Moulavi et al.
+        The existing HDBSCAN implementation also does not suggest any fallback.
+        In such case, NumPy raises a RuntimeWarning and 
+        we return None for the aggregate DBCV score and individual cluster scores are returned for downstream diagnostics.
               
     """
 
@@ -76,13 +95,13 @@ def DBCV_score(
     (
         status, 
         cluster_sort, cluster_groups, cluster_bounds, 
-        n_samp, d, N_clust
+        n_samp, N_clust
     ) = _format_data(
         X, labels,
     )
 
     if status != _SUCCESS :
-        print(EXIT[status])
+        logger.warning(EXIT[status])
         return None
 
     ## Sparseness calculation and find core points
@@ -90,10 +109,10 @@ def DBCV_score(
         sparseness,
         core_pts, core_dists_arr
     ) = intracluster_analysis(
-        N_clust, d, cluster_groups,
-        **kwargs_parallel
+        N_clust, cluster_groups,
+        n_jobs=n_jobs,
     )
-    print("Intra-Cluster Analysis : SUCCESS ✓")
+    logger.info("Intra-Cluster Analysis : SUCCESS ✓")
     
     ## Format core points for intercluster analysis        
     (
@@ -105,14 +124,13 @@ def DBCV_score(
 
     ## Separation calculation
     separation = intercluster_analysis(
-        N_clust, d,
+        N_clust,
         core_cluster_sort, core_cluster_groups, core_cluster_bounds,
         core_dists_arr,
-        **kwargs_parallel
+        n_jobs=n_jobs,
     )
-    print("Inter-Cluster Analysis : SUCCESS ✓")
+    logger.info("Inter-Cluster Analysis : SUCCESS ✓")
 
-    print("Scoring ....")
     ## Compute individual and aggregate DBCV scores
     return _weighted_score(
         n_samp,
@@ -134,16 +152,37 @@ def _weighted_score(
     according to the definitions in Moulavi et al.
 
     Optionally returns individual scores if desired.
-    """
 
-    cluster_scores = (
-        (separation - sparseness) /
-        np.maximum(separation, sparseness)
-    )
-    DBCV_val = np.sum((np.diff(cluster_bounds) / n_samp) * cluster_scores)
+    """
+    # Optimization: use NumPy vectorization instead of a Python loop over clusters.
+    with np.errstate(invalid='warn'):
+        cluster_scores = (
+            (separation - sparseness) /
+            np.maximum(separation, sparseness)
+        )
+
+    # For a cluster i,
+    #   separation > 0, sparseness = 0 : cluster_scores_i = +1, heuristically the best case
+    #   separation = 0, sparseness > 0 : cluster_scores_i = -1, heuristically the worst case
+    #
+    #   separation = 0, sparseness = 0 : cluster_scores_i not defined in the original paper by Moulavi et al.
+    #       The existing HDBSCAN implementation also does not suggest any fallback.
+    #       In such case, we raise a warning and return individual cluster scores for downstream diagnostics.
+    nan_clusters = np.flatnonzero(np.isnan(cluster_scores))
+    if len(nan_clusters):
+        logger.warning(
+            "⚠ %d cluster(s) %s have separation=sparseness=0; DBCV_val undefined, returning per-cluster diagnostics instead.",
+            len(nan_clusters), nan_clusters.tolist(),
+        )
+        DBCV_val = None
+        ind_clust_scores = True
+    else: DBCV_val = np.sum(
+        (np.diff(cluster_bounds) / n_samp) *
+        cluster_scores
+    ).item()
 
     return ( 
-        DBCV_val.item(), 
+        DBCV_val, 
         cluster_scores if ind_clust_scores else None
     )
 
@@ -153,10 +192,44 @@ def _weighted_score(
 ## =======================================================
 # Density Sparseness of a Cluster (DSC)
 ## =======================================================
+def _dsc_base(
+        cluster: npt.NDArray[np.floating], 
+    ) -> Tuple[
+        float,
+        npt.NDArray[np.integer],
+        npt.NDArray[np.floating]
+    ]: 
+    """
+    intracluster analysis base function for joblib.Parallel(...).
+    """
+    # pairwise distances 
+    intra_clust_matrix_condensed = pdist(
+        cluster,
+        metric="euclidean",
+    )
+
+    # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
+    # instead of materializing an n×n distance matrix. 
+    all_pts_core_dists = APCD(intra_clust_matrix_condensed, cluster.shape[1])
+
+    # Optimization: applies the maximum operation only to the n(n-1)/2 distance-core_i-core_j tuples,
+    # without first materializing an n×n distance matrix.
+    intraclust_MRD_matrix = MRD(
+        intra_clust_matrix_condensed,
+        all_pts_core_dists,
+    )
+
+    # Optimization: generic Kruskal-based MST builder is replaced with 
+    # Prim's-based implementation for dense MRD matrix.
+    sparseness, core_pts = _MST_builder_HDBSCAN(intraclust_MRD_matrix)
+
+    return sparseness, core_pts, all_pts_core_dists[core_pts]
+
+
 def intracluster_analysis(
-        N_clust: int, d: int,
+        N_clust: int, 
         cluster_groups: List[npt.NDArray[np.floating]],
-        **kwargs_parallel
+        **kwargs
     ) -> Tuple[
         npt.NDArray[np.floating],
         List[npt.NDArray[np.integer]],
@@ -171,9 +244,6 @@ def intracluster_analysis(
     -----
     N_clust : int
         Number of non-noise clusters to be analyzed.
-
-    d : int
-        The dimensionality of the data.
 
     cluster_groups : List[npt.NDArray[np.floating]]
         List of coordinates arrays containing the observations belonging to each non-noise cluster.
@@ -201,32 +271,16 @@ def intracluster_analysis(
     core_dists_arr = []
     core_pts = []
 
-    for id, cluster in enumerate(cluster_groups):
-        # pairwise distances 
-        intra_clust_matrix_condensed = pdist(
-            cluster,
-            metric="euclidean",
-        )
+    results = Parallel(
+        n_jobs=kwargs.get("n_jobs", 1),
+        return_as="generator",
+        prefer="threads",
+    )(delayed(_dsc_base)(cluster) for cluster in cluster_groups)
 
-        # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
-        # instead of materializing an n×n distance matrix. 
-        all_pts_core_dists = APCD(intra_clust_matrix_condensed, d)
-
-        # Optimization: applies the maximum operation only to the n(n-1)/2 distance-core_i-core_j tuples,
-        # without first materializing an n×n distance matrix.
-        intraclust_MRD_matrix = MRD(
-            intra_clust_matrix_condensed,
-            all_pts_core_dists,
-        )
-
-        # Optimization: generic Kruskal-based MST builder is replaced with 
-        # Prim's-based implementation for dense MRD matrix.
-        sparseness_i, core_pts_i = _MST_builder_HDBSCAN(intraclust_MRD_matrix)
-
-        core_pts.append(core_pts_i)
-        core_dists_arr.append(all_pts_core_dists[core_pts_i])
-
-        sparseness[id] = sparseness_i
+    for id, val_pts_dists in enumerate(results):
+        sparseness[id] = val_pts_dists[0]
+        core_pts.append(val_pts_dists[1])
+        core_dists_arr.append(val_pts_dists[2])
 
     # Combine the list of core-distance arrays for each cluster into a single array,
     # while maintaining the cluster order.
@@ -236,7 +290,6 @@ def intracluster_analysis(
         sparseness,
         core_pts, core_dists_arr
     )
-
 
 
 @njit(cache=True)
@@ -266,13 +319,14 @@ def APCD(
     #   (0,1), (0,2), ..., (0,n-1), (1,2), ..., (1,n-1), ..., (n-2,n-1).
     # Each distance contributes to the core-distance sum of both endpoints.
     idx = 0
-    for i in range(n - 1): # row id
-        for j in range(i + 1, n):  # upper-triangular column id
-            w = (dist_matrix_condensed[idx] ** p) 
-            all_pts_core_dists[i] += w
-            all_pts_core_dists[j] += w
+    with np.errstate(divide='ignore'): # duplicate point → APCD = 0 (see, https://github.com/scikit-learn-contrib/hdbscan/issues/127)
+        for i in range(n - 1): # row id
+            for j in range(i + 1, n):  # upper-triangular column id
+                w = (dist_matrix_condensed[idx] ** p) 
+                all_pts_core_dists[i] += w
+                all_pts_core_dists[j] += w
 
-            idx += 1
+                idx += 1
 
     all_pts_core_dists = (
         all_pts_core_dists / (n - 1)
@@ -362,6 +416,18 @@ def _MST_builder_HDBSCAN(
     return sparseness, core_pts
 
 
+
+## ------------ What's Next ? -------------------------
+
+# HDBSCAN mst_linkage_core(...) takes n×n dense distance matrix as input.
+#
+# We have evaluated pdist(...)'s condensed distance vector of len n(n-1)/2 already.
+# If we can patch the code to exploit the symmetry of (i, j) & (j, i),
+# we can reduce peak memory by around 50% for this specific step..
+
+# -------------------------------
+
+
 ## =======================================================
 
 
@@ -371,12 +437,12 @@ def _MST_builder_HDBSCAN(
 # Density Separation of a Pair of Clusters (DSPC)
 ## =======================================================
 def intercluster_analysis(
-        N_clust: int, d: int,
+        N_clust: int,
         core_cluster_sort: npt.NDArray[np.floating],
         core_cluster_groups: List[npt.NDArray[np.floating]],
         core_cluster_bounds: npt.NDArray[np.integer],
         core_dists_arr: npt.NDArray[np.floating],
-        **kwargs_parallel
+        **kwargs
     ) -> npt.NDArray[np.floating]:
     """
     Computes the separation value for each cluster according to the definitions in Moulavi et al.
@@ -386,9 +452,6 @@ def intercluster_analysis(
     -----
     N_clust : int
         Number of non-noise clusters to be analyzed.
-
-    d : int
-        The dimensionality of the data.
 
     core_cluster_sort : npt.NDArray[np.floating]
         2-D master array containing coordinates for all core points, sorted by cluster label.
@@ -417,6 +480,7 @@ def intercluster_analysis(
 
     # all core-points
     Tree = cKDTree(core_cluster_sort)
+    n_jobs = kwargs.get("n_jobs", 1)
 
     for id, cluster in enumerate(core_cluster_groups):
         # [start,end) corresponds to current label in core_cluster_sort
@@ -425,11 +489,49 @@ def intercluster_analysis(
         rows = np.arange(cluster_core_size)
         query_core_dists = core_dists_arr[start: end]
 
-        # k is chosen such that each query must return atleast one neighbor with different cluster label
+        # k is chosen such that each query must return atleast one neighbor with different cluster label.
+        # We have preprocessed the data via _format_data() such that,
+        #   no. of clusters >= 2
+        #   each cluster having >= 3 nodes, i.e. atleast one core point
+        # So, k = cluster_core_size + 1 works without fail.
         NN_dists, NN_indices = Tree.query(
             cluster, 
             k=cluster_core_size + 1,
+            workers=n_jobs,
         )
+        ## ----- Should we build separate tree per cluster ?? ------------------
+        # N = no. of core points
+        # p = no. of clusters
+        # d = dimensions <-- fix for both approaches
+        # N = sum(N_i)
+
+        # TREE BUILDING COST : O(N * logN) 
+        # --------------------
+        #    per-cluster wins over global tree in terms of tree building.
+        #        sum_i{N_i * logN_i} < N * logN 
+        #
+        # k-NN QUERY COST : O(logN + k) / query
+        # -----------------
+        #    Global approach : 
+        #    [step-1] for cluster i, we have to choose k = N_i + 1 to ensure atleast one outside cluster neighbor.
+        #        for all observations combined,
+        #        sum_i{N_i * (logN + N_i)} 
+        #    [step-2] out of the k neighbors per query, find the closest outside neighbor.
+        #        sum_i{N_i * N_i}
+        #
+        #    per-cluster approach : 
+        #    [step-1] for cluster i, we have loop over j != i, with k = 1 suffices.
+        #        for all observations combined,
+        #        sum_i{N_i * sum_j_neq_i{logN_j}} <---- can be pretty large as (logx + logy + ...) > log(x+y+...)
+        #    [step-2] out of the p - 1 outside neighbors per query, find the closest one.
+        #        sum_i{N_i * p} 
+
+        # Unless p is very small compared to N_i (i.e. you have a handfew of very large clusters),
+        # the additional development effort of per-cluster approach with python-loop overhead is not justified, 
+        # over the optimized C++ based available global implementation.
+        #
+        # Note: query_ball_point(...) is effiectively applicable on a small fraction of points, hence not compared here.
+        # ------------------------------------
 
         # Optimization: The nearest outside neighbor for each core point with respect to Euclidean distance is selected 
         # using a vectorized operation; no Python loop is required.
@@ -466,6 +568,7 @@ def intercluster_analysis(
         # Use the minimum MRD among the nearest (euclidean distance) outside-cluster neighbours
         # as the initial estimate of cluster separation.
         init_separation = MRD_arr[rows, MRD_component].min()
+        separation[id] = init_separation
 
         # Identify points requiring the radial check.
         # We shorlisted outer-core point j by euclidean distance d_ij, for each inner-core point i.
@@ -489,13 +592,14 @@ def intercluster_analysis(
             & (MRD_arr[:, 0] < init_separation)
         )
 
-        if check_radially.size == 0:
-            separation[id] = init_separation
-        else:
+        if not len(check_radially): 
+            continue
+        else:  
             radial_check = Tree.query_ball_point(
                 cluster[check_radially],
                 r=init_separation,
                 return_sorted=False,
+                workers=n_jobs,
             )
             
         # Optimization: Tree.query_ball_point() returns an object array of List[int].
@@ -505,52 +609,70 @@ def intercluster_analysis(
         neighbors_new = []
         for i, k in zip(check_radially, radial_check):
             l = len(k)
-            if not l : continue # skip where no neighbors found in radial check
+            if not l : continue 
 
             neighbors_new.extend(k)
             query.extend(l * [i])
 
-        neighbors_new = np.array(neighbors_new, dtype=IDX_DTYPE)
-        outer_core_pts_new = ~(
-            (neighbors_new >= start) &
-            (neighbors_new < end)
-        )
-        neighbors_new = neighbors_new[outer_core_pts_new]  
-        query = np.fromiter(
-            compress(query, outer_core_pts_new),
-            dtype=IDX_DTYPE,
-            count=outer_core_pts_new.sum(),
-        ) # expecting only a small fraction of query to be selected
-
-        MRD_NN_out_updated = np.maximum.reduce(
-            (
-                # euclidean distance
-                np.linalg.norm(
-                    cluster[query] - core_cluster_sort[neighbors_new],
-                    axis=1,
-                ),
-                # inner core distance
-                query_core_dists[query],
-                # outer core distance
-                core_dists_arr[neighbors_new]
+        if neighbors_new:
+            neighbors_new = np.array(neighbors_new, dtype=IDX_DTYPE)
+            outer_core_pts_new = ~(
+                (neighbors_new >= start) &
+                (neighbors_new < end)
             )
-        ).min()
 
-        separation[id] = min(
-            init_separation,
-            MRD_NN_out_updated,
-        )
+            if outer_core_pts_new.any():
+                neighbors_new = neighbors_new[outer_core_pts_new]  
+                query = np.fromiter(
+                    compress(query, outer_core_pts_new),
+                    dtype=IDX_DTYPE,
+                    count=outer_core_pts_new.sum(),
+                ) # expecting only a small fraction of query to be selected
+
+                MRD_NN_out_updated = np.maximum.reduce(
+                    (
+                        # euclidean distance
+                        np.linalg.norm(
+                            cluster[query] - core_cluster_sort[neighbors_new],
+                            axis=1,
+                        ),
+                        # inner core distance
+                        query_core_dists[query],
+                        # outer core distance
+                        core_dists_arr[neighbors_new]
+                    )
+                ).min()
+
+                separation[id] = min(
+                    separation[id],
+                    MRD_NN_out_updated,
+                )
 
     return separation
 
 
+
+## ------------ What's Next ? -------------------------
+
+# KD-Tree is not label-aware.
+# So, to ensure we get neighbor from different cluster label,
+# we use k = current_cluster_size + 1 as buffer in Tree.query(...), followed by immediate post-processing.
+
+# When data is label-sorted, a cluster is an Index range [start, end).
+# We can patch cKDTree(...) to do that Index filtering in C++ before returning the output,
+# and set k = 1, our exact desired value.
+# It can reduce the intermediate memory wastage, while the total complexity remains the same.
+
+# -------------------------------
+
+
 ## =======================================================
 
 
 
 
 ## =======================================================
-# Sort [Data | Label]   ✓
+# Sort [Data | Label]   
 ## =======================================================
 def _format_data(
         X: npt.NDArray[np.floating],
@@ -560,7 +682,6 @@ def _format_data(
         Optional[npt.NDArray[np.floating]],
         Optional[List[npt.NDArray[np.floating]]],
         Optional[npt.NDArray[np.integer]],
-        int,
         int,
         int
     ]:
@@ -601,25 +722,46 @@ def _format_data(
             Total number of observations (including noise).
 
         - int:
-            Dimensionality of the feature space.
-
-        - int:
             Number of non-noise clusters.
 
     """
-    n_samp, d = X.shape
+    n_samp = X.shape[0]
 
-    # Optimization: avoid hstack([X, labels]) as it allocates new memory,
-    # which is wasteful for large X.
+    # count labels 
+    unique, n_labels = np.unique(
+        labels,
+        return_counts=True, sorted=True,
+    )
+
+    # count noise
+    if (unique[0] == -1):
+        unique = unique[1:]
+        n_noise, n_labels = n_labels[0], n_labels[1:]
+    else: n_noise = 0
+
+    if len(unique) == 0: # Check: if all data is noise.
+        return _ALL_NOISE, None, None, None, 0, 0
+    if len(unique) == 1: # Check: if fewer than two non-noise clusters.
+        return _NOT_ENOUGH_CLUSTERS, None, None, None, 0, 0
+        
+    # Sort the arrays by cluster label.
+    # Optimization: avoid hstack([X, labels]) as it allocates new memory, which is wasteful for large X.
     # Work on existing X and labels: WITH CAUTION - No Mutation.
     # The final label information is fully recoverable from cluster_bounds.
-    (
-        status, 
-        X, labels,
-        cluster_bounds, noise_end
-    ) = _make_clusters_contiguous(X, labels)
+    sort_order = labels.argsort()
+    X, labels = X[sort_order], labels[sort_order]
 
-    if status != _SUCCESS : return (status, None, None, None, 0, 0, 0)
+    # Sorting the labels does not change their counts.
+    # if noise exists, it will be the very first cluster in the sorted output.
+    #
+    # If n_labels[0] = 5, n_labels[1] = 11, n_labels[2] = 4,
+    # then in the sorted array X:
+    #   unique[0] belongs to rows [0, 5) + n_noise
+    #   unique[1] belongs to rows 5 + [0, 11) + n_noise
+    #   unique[2] belongs to rows 5 + 11 + [0, 4) + n_noise
+    cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
+    cluster_bounds[0] = 0
+    np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
 
     # Compute the size of each contiguous label group [start, end).
     cluster_sizes = np.diff(cluster_bounds)
@@ -630,29 +772,49 @@ def _format_data(
     small_clusters = (cluster_sizes < 3)
 
     if small_clusters.any():
-        for id in np.flatnonzero(small_clusters):
+        small_cluster_ids = np.flatnonzero(small_clusters)
+        logger.warning(
+            "⚠ %d cluster(s) %s have size < 3; reassigning to noise (see, https://rdrr.io/cran/dbscan/src/R/dbcv.R).",
+            len(small_cluster_ids), unique[small_cluster_ids].tolist(),
+        )
+
+        for id in small_cluster_ids:
             cluster = slice(
-                cluster_bounds[id],
-                cluster_bounds[id + 1],
+                n_noise + cluster_bounds[id],
+                n_noise + cluster_bounds[id + 1],
             )
 
             labels[cluster] = -1
 
-        (
-            status, 
-            X, labels,
-            cluster_bounds, noise_end
-        ) = _make_clusters_contiguous(X, labels)
+        # re-count labels 
+        unique, n_labels = np.unique(
+            labels,
+            return_counts=True, sorted=True,
+        )
 
-        if status != _SUCCESS : return (status, None, None, None, 0, 0, 0)
+        # data must have noise after the readjustment of small_clusters
+        unique = unique[1:]
+        n_noise, n_labels = n_labels[0], n_labels[1:]
+        if len(unique) == 0: # Check: if all data is noise.
+            return _ALL_NOISE, None, None, None, 0, 0
+        if len(unique) == 1: # Check: if fewer than two non-noise clusters.
+            return _NOT_ENOUGH_CLUSTERS, None, None, None, 0, 0
 
-    # Remove the noise group from the data,
-    # and accordingly adjust the indices.
-    if noise_end: 
-        cluster_sort = X[noise_end:]
-        cluster_bounds -= noise_end
-    else:
-        cluster_sort = X
+        # Optimization: the non-noise rows are already label-sorted, with some noise rows in between.
+        # Avoid sorting the data by label for a second time O(NlogN), when a boolean mask suffices O(N). 
+        cluster_sort = np.asarray(
+            X[(labels != -1)],
+            dtype=X.dtype,
+        )
+
+        # updated cluster bounds
+        cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
+        cluster_bounds[0] = 0
+        np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
+
+    else: 
+    # Remove the noise group from the data.
+        cluster_sort = X[n_noise:]
 
     # cluster_bounds is of len (N_clust + 1):
     #   [0, start_index_1, start_index_2, ..., start_index_last, N]
@@ -667,62 +829,8 @@ def _format_data(
     return (
         _SUCCESS, 
         cluster_sort, cluster_groups, cluster_bounds, 
-        n_samp, d, N_clust
+        n_samp, N_clust
     )
-
-
-
-def _make_clusters_contiguous(
-        X: npt.NDArray[np.floating],
-        labels: npt.NDArray[np.integer],
-    ) -> Tuple[
-        int,
-        Optional[npt.NDArray[np.floating]],
-        Optional[npt.NDArray[np.integer]],
-        Optional[npt.NDArray[np.integer]],
-        int
-    ]:
-    """
-    Sort Data by increasing order of Labels.
-
-    """
-    # Check: if all data is noise.
-    if np.all(labels == -1):
-        return _ALL_NOISE, None, None, None, 0
-
-    # count labels 
-    unique, n_labels = np.unique(
-        labels,
-        return_counts=True, sorted=True,
-    )
-    has_noise = (unique[0] == -1)
-
-    # Check: if fewer than two non-noise clusters.
-    if len(unique) - has_noise < 2:
-        return _NOT_ENOUGH_CLUSTERS, None, None, None, 0
-
-    # Sort the arrays by cluster label.
-    sort_order = labels.argsort()
-    X_sorted, labels_sorted = X[sort_order], labels[sort_order]
-
-    # Sorting the labels does not change their counts.
-    # If n_labels[0] = 5, n_labels[1] = 11, n_labels[2] = 4,
-    # then in the sorted array :
-    #   unique[0] belongs to rows [0, 5)
-    #   unique[1] belongs to rows 5 + [0, 11)
-    #   unique[2] belongs to rows 5 + 11 + [0, 4)
-    cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
-    cluster_bounds[0] = 0
-    np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
-
-    # Check: data contains noise observations (-1 labels) or not.
-    # if noise exists, it will be the very first cluster in the sorted output.
-    if has_noise:
-        noise_end = cluster_bounds[1]
-        cluster_bounds = cluster_bounds[1:]
-    else : noise_end = 0
-
-    return _SUCCESS, X_sorted, labels_sorted, cluster_bounds, noise_end
 
 
 def _format_core_points(
