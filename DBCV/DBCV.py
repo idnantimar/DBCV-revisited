@@ -33,9 +33,15 @@ def DBCV_score(
         X: npt.NDArray[np.floating],
         labels: npt.NDArray[np.integer],
         *,
-        ind_clust_scores: bool = False,
+        per_cluster_scores: bool = False,
         n_jobs: int = 1,
-    ) -> Optional[Tuple[float, Optional[npt.NDArray[np.floating]]]]:
+    ) -> Optional[
+        float | 
+        Tuple[
+            float | None,
+            npt.NDArray[np.floating],
+        ]
+    ]:
     """
     Compute the aggregate DBCV score and, optionally, individual cluster scores for the given coordinates and cluster labels.
     [see, `intracluster_analysis()` & `intercluster_analysis()` for details.]
@@ -56,7 +62,7 @@ def DBCV_score(
             Noise points must be labelled -1.
             Any cluster having size < 3 will be relabelled as noise (see, https://rdrr.io/cran/dbscan/src/R/dbcv.R).
 
-    ind_clust_scores : bool, default=False
+    per_cluster_scores : bool, default=False
         If True, return the individual DBCV score for each cluster in addition to the aggregate DBCV score. 
         If False, only the aggregate DBCV score is returned and the second return value is None.
 
@@ -65,13 +71,12 @@ def DBCV_score(
     
     Returns
     -------
-    tuple or None
+    float, tuple or None
         On success, returns:
-            - float: Aggregate DBCV score.
-            - npt.NDArray[np.floating] or None: 
-                If `ind_clust_scores=True`, individual cluster scores are returned.
+            - float: Aggregate DBCV score if `per_cluster_scores=False`.
+            - tuple: 
+                Aggregate DBCV score and individual cluster scores if `per_cluster_scores=True`.
                 The scores are sorted by cluster labels, not in original observed order.
-                If `ind_clust_scores=False`, returns None.
 
         Returns None if the data cannot be scored, due to not having enough non-noise clusters.
 
@@ -136,7 +141,7 @@ def DBCV_score(
         n_samp,
         sparseness, separation,
         cluster_bounds,
-        ind_clust_scores,
+        per_cluster_scores,
     )
 
 
@@ -145,8 +150,8 @@ def _weighted_score(
         sparseness: npt.NDArray[np.floating],
         separation: npt.NDArray[np.floating],
         cluster_bounds: npt.NDArray[np.integer],
-        ind_clust_scores: bool = False,
-    ) -> Tuple[float, Optional[npt.NDArray[np.floating]]]:
+        per_cluster_scores: bool = False,
+    ) -> float | Tuple[float, npt.NDArray[np.floating]] | None:
     """
     Performs weighted averaging of individual cluster scores to yield the aggregate DBCV score
     according to the definitions in Moulavi et al.
@@ -175,15 +180,16 @@ def _weighted_score(
             len(nan_clusters), nan_clusters.tolist(),
         )
         DBCV_val = None
-        ind_clust_scores = True
+        per_cluster_scores = True
     else: DBCV_val = np.sum(
         (np.diff(cluster_bounds) / n_samp) *
         cluster_scores
     ).item()
 
     return ( 
-        DBCV_val, 
-        cluster_scores if ind_clust_scores else None
+        DBCV_val
+        if not per_cluster_scores 
+        else (DBCV_val, cluster_scores)
     )
 
 
@@ -306,12 +312,12 @@ def APCD(
             mean_{j != i} dist(i,j)^(-d)
         ]^(-1/d)
 
-    where n is the number of points in the cluster and d is the
-    dimensionality of the data.
+    where n is the number of points in the cluster and d is the dimensionality of the data.
+
     """
     # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
     # instead of materializing an n×n distance matrix.
-    p = - d
+    p = - d # duplicate point → APCD = 0 as intended (see, https://github.com/scikit-learn-contrib/hdbscan/issues/127)
     n = int(0.5 * (1 + sqrt(1 + 8 * len(dist_matrix_condensed)))) # quadratic eqn: condensed_size = n(n-1)/2
     all_pts_core_dists = np.zeros(n, dtype=dist_matrix_condensed.dtype)
 
@@ -319,14 +325,13 @@ def APCD(
     #   (0,1), (0,2), ..., (0,n-1), (1,2), ..., (1,n-1), ..., (n-2,n-1).
     # Each distance contributes to the core-distance sum of both endpoints.
     idx = 0
-    with np.errstate(divide='ignore'): # duplicate point → APCD = 0 (see, https://github.com/scikit-learn-contrib/hdbscan/issues/127)
-        for i in range(n - 1): # row id
-            for j in range(i + 1, n):  # upper-triangular column id
-                w = (dist_matrix_condensed[idx] ** p) 
-                all_pts_core_dists[i] += w
-                all_pts_core_dists[j] += w
+    for i in range(n - 1): # row id
+        for j in range(i + 1, n):  # upper-triangular column id
+            w = (dist_matrix_condensed[idx] ** p) 
+            all_pts_core_dists[i] += w
+            all_pts_core_dists[j] += w
 
-                idx += 1
+            idx += 1
 
     all_pts_core_dists = (
         all_pts_core_dists / (n - 1)
