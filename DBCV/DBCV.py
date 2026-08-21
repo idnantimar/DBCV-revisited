@@ -1,8 +1,6 @@
 import numpy as np
 from numba import njit
-from math import sqrt
 from itertools import compress
-from scipy.spatial.distance import pdist
 from hdbscan._hdbscan_linkage import mst_linkage_core
 from scipy.spatial import cKDTree
 from joblib import Parallel, delayed
@@ -26,6 +24,10 @@ EXIT = {
 # default dtypes
 FLOAT_DTYPE = np.float64
 IDX_DTYPE = np.intp
+# Many downstream operations natively use Float64 and upcast Float32 inputs.
+# Therefore, storing intermediate results as Float32 provides little benefit
+# and may introduce unnecessary Float32 ⟷ Float64 round-trips.
+# For Index, use the system default. 
 
 
 
@@ -93,10 +95,13 @@ def DBCV_score(
         we return None for the aggregate DBCV score and individual cluster scores are returned for downstream diagnostics.
               
     """
+    ## Optimization: avoid redundant memory allocation if data is already in correct format
+    X, labels = (
+        np.asarray(X).astype(FLOAT_DTYPE, copy=False), 
+        np.asarray(labels).astype(IDX_DTYPE, copy=False)
+    )
 
-    X, labels = np.asarray(X), np.asarray(labels)
-
-    ## Format the data to make clusters contiguous
+    ## Shuffle the data to make clusters contiguous
     (
         status, 
         cluster_sort, cluster_groups, cluster_bounds, 
@@ -112,7 +117,7 @@ def DBCV_score(
     ## Sparseness calculation and find core points
     (
         sparseness,
-        core_pts, core_dists_arr
+        core_pts, n_core_pts, core_dists_arr
     ) = intracluster_analysis(
         N_clust, cluster_groups,
         n_jobs=n_jobs,
@@ -124,7 +129,8 @@ def DBCV_score(
         core_cluster_sort, 
         core_cluster_groups, core_cluster_bounds
     ) = _format_core_points(
-        cluster_sort, cluster_bounds, core_pts,
+        cluster_sort, cluster_bounds, N_clust,
+        core_pts, n_core_pts,
     )
 
     ## Separation calculation
@@ -208,22 +214,9 @@ def _dsc_base(
     """
     intracluster analysis base function for joblib.Parallel(...).
     """
-    # pairwise distances 
-    intra_clust_matrix_condensed = pdist(
-        cluster,
-        metric="euclidean",
-    )
-
-    # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
-    # instead of materializing an n×n distance matrix. 
-    all_pts_core_dists = APCD(intra_clust_matrix_condensed, cluster.shape[1])
-
-    # Optimization: applies the maximum operation only to the n(n-1)/2 distance-core_i-core_j tuples,
-    # without first materializing an n×n distance matrix.
-    intraclust_MRD_matrix = MRD(
-        intra_clust_matrix_condensed,
-        all_pts_core_dists,
-    )
+    # Optimization: use allocated memory of mutual-reachability distances 
+    # to hold ordinary distances in intermediate steps.
+    all_pts_core_dists, intraclust_MRD_matrix = APCD_denseMRD(cluster)
 
     # Optimization: generic Kruskal-based MST builder is replaced with 
     # Prim's-based implementation for dense MRD matrix.
@@ -239,6 +232,7 @@ def intracluster_analysis(
     ) -> Tuple[
         npt.NDArray[np.floating],
         List[npt.NDArray[np.integer]],
+        int,
         npt.NDArray[np.floating]
     ]:
     """
@@ -265,11 +259,12 @@ def intracluster_analysis(
         - List[npt.NDArray[np.integer]]:
             Indices of the core points (i.e. degree >1)  in each cluster.
 
+        - int: 
+            Total number of core points, combined from all clusters.
+
         - npt.NDArray[np.floating]:
             The all-points core distances for the core points, combined from all clusters.
 
-
-    WORKHORSE: https://github.com/scikit-learn-contrib/hdbscan/blob/master/hdbscan/_hdbscan_linkage.pyx
 
     """
 
@@ -280,7 +275,7 @@ def intracluster_analysis(
     results = Parallel(
         n_jobs=kwargs.get("n_jobs", 1),
         return_as="generator",
-        prefer="threads",
+        prefer="processes",
     )(delayed(_dsc_base)(cluster) for cluster in cluster_groups)
 
     for id, val_pts_dists in enumerate(results):
@@ -291,93 +286,105 @@ def intracluster_analysis(
     # Combine the list of core-distance arrays for each cluster into a single array,
     # while maintaining the cluster order.
     core_dists_arr = np.concat(core_dists_arr, dtype=FLOAT_DTYPE)
+    n_core_pts = len(core_dists_arr)
 
     return (
         sparseness,
-        core_pts, core_dists_arr
+        core_pts, n_core_pts, core_dists_arr
     )
 
 
-@njit(cache=True)
-def APCD(
-        dist_matrix_condensed: npt.NDArray[np.floating],
-        d: int,
-    ) -> npt.NDArray[np.floating]:
+
+@njit(cache=True, error_model="numpy")
+def APCD_denseMRD(
+    X: npt.NDArray[np.floating],
+) -> tuple[
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
+]:
     """
-    Computes the all-points core distance according to the DBCV definition.
+    Computes APCD & MRD in a single pairwise pass over input array.
 
     The all-points core distance of point i is
-
-        core(i) = [
+        APCD(i) = [
             mean_{j != i} dist(i,j)^(-d)
         ]^(-1/d)
 
-    where n is the number of points in the cluster and d is the dimensionality of the data.
+    and
+
+    The mutual-reachability distances between points (i, j) is
+        MRD(i,j) = max(
+            dist(i,j),
+            core(i), core(j)
+        )
+
+    where dist(i,j) is the squared-Euclidean distance.
+    The paper by Moulavi et al. suggests, and the original MATLAB implementation subsequently uses, 
+    squared-Euclidean distance rather than Euclidean distance
+    (squared-Euclidean distance assigns greater weight to closer neighbors in the APCD calculation).
+
+    NOTE: duplicate points (i, j) → APCD(i) = 0 = APCD(j) as intended.
+
+    
+    Returns
+    -------
+    all_pts_core_dists : ndarray of shape (n,)
+        All-points core distances.
+
+    mrd : ndarray of shape (n, n)
+        Mutual-reachability distance matrix.
 
     """
-    # Optimization: operate directly on pdist()'s condensed distance vector of len n(n-1)/2 
-    # instead of materializing an n×n distance matrix.
-    p = - d # duplicate point → APCD = 0 as intended (see, https://github.com/scikit-learn-contrib/hdbscan/issues/127)
-    n = int(0.5 * (1 + sqrt(1 + 8 * len(dist_matrix_condensed)))) # quadratic eqn: condensed_size = n(n-1)/2
-    all_pts_core_dists = np.zeros(n, dtype=dist_matrix_condensed.dtype)
+    n, d = X.shape
 
-    # pdist() stores the upper-triangular pairwise distances in the row-major ordering:
-    #   (0,1), (0,2), ..., (0,n-1), (1,2), ..., (1,n-1), ..., (n-2,n-1).
-    # Each distance contributes to the core-distance sum of both endpoints.
-    idx = 0
+    core_sum = np.zeros(n, dtype=X.dtype)
+    mrd = np.zeros((n, n), dtype=X.dtype)
+
+    # Optimization: the upper triangle of `mrd` temporarily stores the sqeuclidean distances before final update.
+    # This way we avoid: 
+    #   additional n(n-1)/2 memory allocation in first-pass, 
+    #   and d * n(n-1)/2 recomputation in second-pass.
+
+    # First pass: compute squared-Euclidean distances and accumulate APCD.
     for i in range(n - 1): # row id
-        for j in range(i + 1, n):  # upper-triangular column id
-            w = (dist_matrix_condensed[idx] ** p) 
-            all_pts_core_dists[i] += w
-            all_pts_core_dists[j] += w
+        xi = X[i]
 
-            idx += 1
+        for j in range(i + 1, n): # upper-triangular column id
+            xj = X[j]
+
+            dist_sq = 0.0
+            for k in range(d): # sqeuclidean
+                diff = xi[k] - xj[k]
+                dist_sq += (diff * diff)
+
+            # due to symmetry d(i, j) contributes to both APCD(i) & APCD(j)
+            w = 1. / (dist_sq ** d)
+            core_sum[i] += w
+            core_sum[j] += w
+
+            # temporary
+            mrd[i, j] = dist_sq
 
     all_pts_core_dists = (
-        all_pts_core_dists / (n - 1)
-    ) ** (1.0 / p) 
+        core_sum / (n - 1)
+    ) ** (-1 / d)
 
-    return all_pts_core_dists 
-
-
-@njit(cache=True)
-def MRD(
-        dist_matrix_condensed: npt.NDArray[np.floating],
-        all_pts_core_dists: npt.NDArray[np.floating],
-    ) -> npt.NDArray[np.floating]:
-    """
-    Constructs mutual-reachability distances.
-
-    MRD(i,j) = max(
-        dist(i,j),
-        core(i),
-        core(j)
-    )
-    """
-    n = len(all_pts_core_dists)
-
-    # Optimization: construct MRD(i, j) directly from the condensed pdist() ordering. 
-    # This applies the maximum operation only to the n(n-1)/2 distance-core tuples,
-    # without first materializing an n×n distance matrix.
-    result = np.zeros(
-        (n, n),
-        dtype=dist_matrix_condensed.dtype,
-    )
-
-    idx = 0
+    # Second pass: construct MRD.
     for i in range(n - 1): # row id
         for j in range(i + 1, n):  # upper-triangular column id
-            mrd = max(
-                dist_matrix_condensed[idx],
+
+            # upper-triangular block of mrd already holds d(i, j) 
+            mrd_ij = max(
+                mrd[i, j],
                 all_pts_core_dists[i],
                 all_pts_core_dists[j],
             )
-            result[i, j] = mrd
-            result[j, i] = mrd
+            mrd[i, j] = mrd_ij
 
-            idx += 1
+            # symmetry of distance matrix
+            mrd[j, i] = mrd_ij
 
-    return result
+    return all_pts_core_dists, mrd
 
 
 def _MST_builder_HDBSCAN(
@@ -387,6 +394,8 @@ def _MST_builder_HDBSCAN(
     Helper function for intracluster_analysis() 
     that identifies core points based on the all points core distance, 
     and then computes the sparseness of the current cluster.
+
+    ref: https://github.com/scikit-learn-contrib/hdbscan/blob/master/hdbscan/_hdbscan_linkage.pyx
     """
     n = MRD_matrix.shape[0]
 
@@ -404,7 +413,7 @@ def _MST_builder_HDBSCAN(
     # Core points are defined as vertices with more than one incident edge in the MST.
     # Heuristically, these internal vertices better represent the cluster's internal structure 
     # than boundary points and are therefore used for sparseness/separation.
-    core_pts = (np.bincount(nodes.ravel(), minlength=n,) > 1) 
+    core_pts = (np.bincount(nodes.ravel(), minlength=n) > 1) 
     internal_edges = core_pts[nodes].all(axis=1)
 
     # Density sparseness is not well defined if there are no internal edges.
@@ -426,9 +435,9 @@ def _MST_builder_HDBSCAN(
 
 # HDBSCAN mst_linkage_core(...) takes n×n dense distance matrix as input.
 #
-# We have evaluated pdist(...)'s condensed distance vector of len n(n-1)/2 already.
-# If we can patch the code to exploit the symmetry of (i, j) & (j, i),
-# we can reduce peak memory by around 50% for this specific step..
+# If we can patch the mst construction Cython routine to utilize the symmetry of distance matrix,
+# we can pass a pdist(...) style condensed n(n-1)/2 distance array,
+# potentially eliminating ~50% of peak memory.
 
 # -------------------------------
 
@@ -764,16 +773,17 @@ def _format_data(
     #   unique[0] belongs to rows [0, 5) + n_noise
     #   unique[1] belongs to rows 5 + [0, 11) + n_noise
     #   unique[2] belongs to rows 5 + 11 + [0, 4) + n_noise
-    cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
+    cluster_bounds = np.empty(len(unique) + 1, dtype=IDX_DTYPE)
     cluster_bounds[0] = 0
     np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
 
-    # Compute the size of each contiguous label group [start, end).
-    cluster_sizes = np.diff(cluster_bounds)
+    # Remove the noise group from the data.
+    cluster_sort = X[n_noise:]
 
     # Following the R dbscan implementation, 
     # reassign non-noise clusters containing fewer than 3 points to noise, 
     # since such clusters cannot contain internal (degree > 1) MST vertices.
+    cluster_sizes = np.diff(cluster_bounds)
     small_clusters = (cluster_sizes < 3)
 
     if small_clusters.any():
@@ -783,43 +793,33 @@ def _format_data(
             len(small_cluster_ids), unique[small_cluster_ids].tolist(),
         )
 
-        for id in small_cluster_ids:
-            cluster = slice(
-                n_noise + cluster_bounds[id],
-                n_noise + cluster_bounds[id + 1],
-            )
-
-            labels[cluster] = -1
-
-        # re-count labels 
-        unique, n_labels = np.unique(
-            labels,
-            return_counts=True, sorted=True,
-        )
-
-        # data must have noise after the readjustment of small_clusters
-        unique = unique[1:]
-        n_noise, n_labels = n_labels[0], n_labels[1:]
+        # re-count labels
+        unique = unique[~small_clusters]
+        n_noise += n_labels.sum(where=small_clusters)
+        n_labels = n_labels[~small_clusters]
         if len(unique) == 0: # Check: if all data is noise.
             return _ALL_NOISE, None, None, None, 0, 0
         if len(unique) == 1: # Check: if fewer than two non-noise clusters.
             return _NOT_ENOUGH_CLUSTERS, None, None, None, 0, 0
 
         # Optimization: the non-noise rows are already label-sorted, with some noise rows in between.
-        # Avoid sorting the data by label for a second time O(NlogN), when a boolean mask suffices O(N). 
+        # Avoid sorting the data by label for a second time O(NlogN), when a XOR toggle suffices O(N). 
+        start_old = cluster_bounds[:-1]
+        mask = np.zeros(cluster_bounds[-1] + 1, dtype=bool) # placeholder for positions [0, 1, 2, ..., N].
+        start_new = start_old[~small_clusters]
+        mask[start_new] = True # assign all start id True
+        mask[start_new + n_labels] ^= True # assign end id as True, overwrite overlapping start id as False
+        mask = np.logical_xor.accumulate(mask)[:-1] # slice [0, N)
+
         cluster_sort = np.asarray(
-            X[(labels != -1)],
+            cluster_sort[mask],
             dtype=X.dtype,
         )
 
         # updated cluster bounds
-        cluster_bounds = np.empty(len(n_labels) + 1, dtype=IDX_DTYPE)
+        cluster_bounds = np.empty(len(unique) + 1, dtype=IDX_DTYPE)
         cluster_bounds[0] = 0
         np.cumsum(n_labels, dtype=IDX_DTYPE, out=cluster_bounds[1:])
-
-    else: 
-    # Remove the noise group from the data.
-        cluster_sort = X[n_noise:]
 
     # cluster_bounds is of len (N_clust + 1):
     #   [0, start_index_1, start_index_2, ..., start_index_last, N]
@@ -829,7 +829,7 @@ def _format_data(
         cluster_sort,
         cluster_bounds[1: -1], 
     )
-    N_clust = len(cluster_groups)
+    N_clust = len(unique)
 
     return (
         _SUCCESS, 
@@ -841,7 +841,9 @@ def _format_data(
 def _format_core_points(
         cluster_sort: npt.NDArray[np.floating],
         cluster_bounds: npt.NDArray[np.integer],
-        core_pts: List[npt.NDArray[np.integer]]
+        N_clust: int,
+        core_pts: List[npt.NDArray[np.integer]],
+        n_core_pts: int,
     ) -> Tuple[
         npt.NDArray[np.floating],
         List[npt.NDArray[np.floating]],
@@ -854,8 +856,8 @@ def _format_core_points(
     [see, intracluster_analysis(...) for core_pts.]
 
     """
-    core_idx = []
-    core_cluster_bounds = np.empty(len(core_pts) + 1, dtype=IDX_DTYPE)
+    core_idx = np.empty(n_core_pts, dtype=IDX_DTYPE)
+    core_cluster_bounds = np.empty(N_clust + 1, dtype=IDX_DTYPE)
     core_cluster_bounds[0] = 0
 
     # Convert cluster-level core_pts indices to global cluster_sort indices.
@@ -864,21 +866,14 @@ def _format_core_points(
     #   and the index-range for cluster-3 is [20,35).
     #   Then globally array([2,5,8]) + 20 = array([22,25,28]) rows are core points.
     for id, pts in enumerate(core_pts):
-        core_cluster_bounds[id + 1] = len(pts) 
-        core_idx.append(
-            pts + cluster_bounds[id]
-        )
+        start = core_cluster_bounds[id]
+        end = start + len(pts) 
+
+        core_idx[start:end] =  pts + cluster_bounds[id]
+        core_cluster_bounds[id + 1] = end
 
     # Extract the core-point rows from the sorted master array.
-    core_cluster_sort = cluster_sort[
-        np.concat(core_idx, dtype=IDX_DTYPE)
-    ]
-
-    # [0, core_start_index_1, core_start_index_2, ..., core_start_index_last, core_end_index_last + 1]
-    core_cluster_bounds = np.cumsum(
-        core_cluster_bounds,
-        dtype=IDX_DTYPE,
-    )
+    core_cluster_sort = cluster_sort[core_idx]
 
     # Split core-point rows by cluster labels.
     core_cluster_groups = np.vsplit(
