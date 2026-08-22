@@ -1,9 +1,11 @@
 import numpy as np
 from numba import njit
 from itertools import compress
-from hdbscan._hdbscan_linkage import mst_linkage_core
 from scipy.spatial import cKDTree
 from joblib import Parallel, delayed
+
+from .utils._apcd_mrd import APCD_condensedMRD
+from .utils._mst import mst_linkage_core_condensed
 
 import numpy.typing as npt
 from typing import List, Tuple, Optional
@@ -21,13 +23,15 @@ EXIT = {
     _NOT_ENOUGH_CLUSTERS: "⚠ Not enough clusters: must have at least two.",
 }
 
-# default dtypes
-FLOAT_DTYPE = np.float64
-IDX_DTYPE = np.intp
+
 # Many downstream operations natively use Float64 and upcast Float32 inputs.
 # Therefore, storing intermediate results as Float32 provides little benefit
 # and may introduce unnecessary Float32 ⟷ Float64 round-trips.
+FLOAT_DTYPE = np.float64
 # For Index, use the system default. 
+IDX_DTYPE = np.intp
+
+
 
 
 
@@ -95,7 +99,7 @@ def DBCV_score(
         we return None for the aggregate DBCV score and individual cluster scores are returned for downstream diagnostics.
               
     """
-    ## Optimization: avoid redundant memory allocation if data is already in correct format
+    ## Optimization: avoid redundant memory allocation if data is already in correct form
     X, labels = (
         np.asarray(X).astype(FLOAT_DTYPE, copy=False), 
         np.asarray(labels).astype(IDX_DTYPE, copy=False)
@@ -113,7 +117,7 @@ def DBCV_score(
     if status != _SUCCESS :
         logger.warning(EXIT[status])
         return None
-
+    
     ## Sparseness calculation and find core points
     (
         sparseness,
@@ -123,7 +127,7 @@ def DBCV_score(
         n_jobs=n_jobs,
     )
     logger.info("Intra-Cluster Analysis : SUCCESS ✓")
-    
+
     ## Format core points for intercluster analysis        
     (
         core_cluster_sort, 
@@ -204,27 +208,6 @@ def _weighted_score(
 ## =======================================================
 # Density Sparseness of a Cluster (DSC)
 ## =======================================================
-def _dsc_base(
-        cluster: npt.NDArray[np.floating], 
-    ) -> Tuple[
-        float,
-        npt.NDArray[np.integer],
-        npt.NDArray[np.floating]
-    ]: 
-    """
-    intracluster analysis base function for joblib.Parallel(...).
-    """
-    # Optimization: use allocated memory of mutual-reachability distances 
-    # to hold ordinary distances in intermediate steps.
-    all_pts_core_dists, intraclust_MRD_matrix = APCD_denseMRD(cluster)
-
-    # Optimization: generic Kruskal-based MST builder is replaced with 
-    # Prim's-based implementation for dense MRD matrix.
-    sparseness, core_pts = _MST_builder_HDBSCAN(intraclust_MRD_matrix)
-
-    return sparseness, core_pts, all_pts_core_dists[core_pts]
-
-
 def intracluster_analysis(
         N_clust: int, 
         cluster_groups: List[npt.NDArray[np.floating]],
@@ -275,7 +258,7 @@ def intracluster_analysis(
     results = Parallel(
         n_jobs=kwargs.get("n_jobs", 1),
         return_as="generator",
-        prefer="processes",
+        prefer="threads",
     )(delayed(_dsc_base)(cluster) for cluster in cluster_groups)
 
     for id, val_pts_dists in enumerate(results):
@@ -294,126 +277,30 @@ def intracluster_analysis(
     )
 
 
-
-@njit(cache=True, error_model="numpy")
-def APCD_denseMRD(
-    X: npt.NDArray[np.floating],
-) -> tuple[
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
-]:
+def _dsc_base(
+        cluster: npt.NDArray[np.floating], 
+    ) -> Tuple[
+        float,
+        npt.NDArray[np.integer],
+        npt.NDArray[np.floating]
+    ]: 
     """
-    Computes APCD & MRD in a single pairwise pass over input array.
-
-    The all-points core distance of point i is
-        APCD(i) = [
-            mean_{j != i} dist(i,j)^(-d)
-        ]^(-1/d)
-
-    and
-
-    The mutual-reachability distances between points (i, j) is
-        MRD(i,j) = max(
-            dist(i,j),
-            core(i), core(j)
-        )
-
-    where dist(i,j) is the squared-Euclidean distance.
-    The paper by Moulavi et al. suggests, and the original MATLAB implementation subsequently uses, 
-    squared-Euclidean distance rather than Euclidean distance
-    (squared-Euclidean distance assigns greater weight to closer neighbors in the APCD calculation).
-
-    NOTE: duplicate points (i, j) → APCD(i) = 0 = APCD(j) as intended.
-
+    intracluster analysis base function for joblib.Parallel(...).
+    """
+    n_i = len(cluster)
     
-    Returns
-    -------
-    all_pts_core_dists : ndarray of shape (n,)
-        All-points core distances.
+    # Optimization: use allocated memory of mutual-reachability distances 
+    # to hold ordinary distances in intermediate steps.
+    all_pts_core_dists, intraclust_condensedMRD = APCD_condensedMRD(cluster)
 
-    mrd : ndarray of shape (n, n)
-        Mutual-reachability distance matrix.
-
-    """
-    n, d = X.shape
-
-    core_sum = np.zeros(n, dtype=X.dtype)
-    mrd = np.zeros((n, n), dtype=X.dtype)
-
-    # Optimization: the upper triangle of `mrd` temporarily stores the sqeuclidean distances before final update.
-    # This way we avoid: 
-    #   additional n(n-1)/2 memory allocation in first-pass, 
-    #   and d * n(n-1)/2 recomputation in second-pass.
-
-    # First pass: compute squared-Euclidean distances and accumulate APCD.
-    for i in range(n - 1): # row id
-        xi = X[i]
-
-        for j in range(i + 1, n): # upper-triangular column id
-            xj = X[j]
-
-            dist_sq = 0.0
-            for k in range(d): # sqeuclidean
-                diff = xi[k] - xj[k]
-                dist_sq += (diff * diff)
-
-            # due to symmetry d(i, j) contributes to both APCD(i) & APCD(j)
-            w = 1. / (dist_sq ** d)
-            core_sum[i] += w
-            core_sum[j] += w
-
-            # temporary
-            mrd[i, j] = dist_sq
-
-    all_pts_core_dists = (
-        core_sum / (n - 1)
-    ) ** (-1 / d)
-
-    # Second pass: construct MRD.
-    for i in range(n - 1): # row id
-        for j in range(i + 1, n):  # upper-triangular column id
-
-            # upper-triangular block of mrd already holds d(i, j) 
-            mrd_ij = max(
-                mrd[i, j],
-                all_pts_core_dists[i],
-                all_pts_core_dists[j],
-            )
-            mrd[i, j] = mrd_ij
-
-            # symmetry of distance matrix
-            mrd[j, i] = mrd_ij
-
-    return all_pts_core_dists, mrd
-
-
-def _MST_builder_HDBSCAN(
-        MRD_matrix: npt.NDArray[np.floating],
-    ) -> Tuple[float, npt.NDArray[np.integer]]:
-    """
-    Helper function for intracluster_analysis() 
-    that identifies core points based on the all points core distance, 
-    and then computes the sparseness of the current cluster.
-
-    ref: https://github.com/scikit-learn-contrib/hdbscan/blob/master/hdbscan/_hdbscan_linkage.pyx
-    """
-    n = MRD_matrix.shape[0]
-
-    # Optimization: use HDBSCAN's specialized implementation of Prim's algorithm 
-    # rather than SciPy's generic Kruskal-based MST routine.
-    # (MRD graph is complete and already represented as a dense distance matrix) 
-    mst = mst_linkage_core(MRD_matrix)
-
-    # MST has n - 1 rows and 3 columns: (from, to, weight). 
-    # Source-node reconstruction is no longer required.
-    # [see HDBSCAN commit 7b2f0e0dcff6ef99b0c976d1471cbeec99da49a9]
-    nodes = mst[:, :-1].astype(IDX_DTYPE)
-    edges = mst[:, -1]
+    # Optimization: generic Kruskal-based MST builder is replaced with Prim's-based implementation.
+    # MST builder is further customized to work on condensed MRD matrix.
+    nodes, edges = mst_linkage_core_condensed(intraclust_condensedMRD)
 
     # Core points are defined as vertices with more than one incident edge in the MST.
     # Heuristically, these internal vertices better represent the cluster's internal structure 
     # than boundary points and are therefore used for sparseness/separation.
-    core_pts = (np.bincount(nodes.ravel(), minlength=n) > 1) 
+    core_pts = (np.bincount(nodes.ravel(), minlength=n_i) > 1) 
     internal_edges = core_pts[nodes].all(axis=1)
 
     # Density sparseness is not well defined if there are no internal edges.
@@ -427,19 +314,7 @@ def _MST_builder_HDBSCAN(
         core_pts
     )
 
-    return sparseness, core_pts
-
-
-
-## ------------ What's Next ? -------------------------
-
-# HDBSCAN mst_linkage_core(...) takes n×n dense distance matrix as input.
-#
-# If we can patch the mst construction Cython routine to utilize the symmetry of distance matrix,
-# we can pass a pdist(...) style condensed n(n-1)/2 distance array,
-# potentially eliminating ~50% of peak memory.
-
-# -------------------------------
+    return sparseness, core_pts, all_pts_core_dists[core_pts]
 
 
 ## =======================================================
@@ -513,6 +388,7 @@ def intercluster_analysis(
             k=cluster_core_size + 1,
             workers=n_jobs,
         )
+
         ## ----- Should we build separate tree per cluster ?? ------------------
         # N = no. of core points
         # p = no. of clusters
@@ -615,7 +491,7 @@ def intercluster_analysis(
                 return_sorted=False,
                 workers=n_jobs,
             )
-            
+
         # Optimization: Tree.query_ball_point() returns an object array of List[int].
         # Instead of doing same calculations in a loop once per query point,
         # flatten the arraay once and utilize numpy vectorized operations for the heavylifting.
