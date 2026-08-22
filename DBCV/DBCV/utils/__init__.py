@@ -1,4 +1,0 @@
-"""
-Optimized Cython/ C++ utilities.
-
-"""
