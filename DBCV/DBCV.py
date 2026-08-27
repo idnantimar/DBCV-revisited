@@ -1,15 +1,14 @@
 import numpy as np
-from numba import njit
-from itertools import compress
-from scipy.spatial import cKDTree
 from joblib import Parallel, delayed
 
-from .utils._apcd_mrd import APCD_condensedMRD
-from .utils._mst import mst_linkage_core_condensed
+from .utils.dsc._apcd_mrd import APCD_condensedMRD
+from .utils.dsc._mst import mst_linkage_core_condensed
+from .utils.dspc._ckdtree import cKDTree
 
 import numpy.typing as npt
 from typing import List, Tuple, Optional
 
+import os 
 import logging
 logger = logging.getLogger(__name__)
 
@@ -33,6 +32,8 @@ IDX_DTYPE = np.intp
 
 
 
+
+__all__ = ['DBCV_score']
 
 
 def DBCV_score(
@@ -105,6 +106,21 @@ def DBCV_score(
         np.asarray(labels).astype(IDX_DTYPE, copy=False)
     )
 
+    if X.ndim != 2:
+        raise ValueError(
+            "X must be a 2-D array of shape (n_samples, n_features)"
+        )
+
+    if labels.ndim != 1:
+        raise ValueError(
+            "labels must be a 1-D array of shape (n_samples,)"
+        )
+
+    if X.shape[0] != labels.shape[0]:
+        raise ValueError(
+            "X and labels must contain the same number of observations"
+        )
+
     ## Shuffle the data to make clusters contiguous
     (
         status, 
@@ -117,6 +133,11 @@ def DBCV_score(
     if status != _SUCCESS :
         logger.warning(EXIT[status])
         return None
+
+    # Optimization: By ensuring that working data contains only finite values,
+    # downstream C-routines can benefit from `-ffinite-math-only` whenever applicable.
+    if not np.isfinite(cluster_sort).all():
+        raise ValueError("data must be finite, check for nan or inf values.")
     
     ## Sparseness calculation and find core points
     (
@@ -255,11 +276,15 @@ def intracluster_analysis(
     core_dists_arr = []
     core_pts = []
 
-    results = Parallel(
-        n_jobs=kwargs.get("n_jobs", 1),
-        return_as="generator",
-        prefer="threads",
-    )(delayed(_dsc_base)(cluster) for cluster in cluster_groups)
+    n_jobs = kwargs.get("n_jobs", 1)
+    if (not n_jobs) or (n_jobs == 1) or (not os.cpu_count()):
+        results = (_dsc_base(cluster) for cluster in cluster_groups)
+    else:    
+        results = Parallel(
+            n_jobs=n_jobs,
+            return_as="generator",
+            backend="threading",
+        )(delayed(_dsc_base)(cluster) for cluster in cluster_groups)
 
     for id, val_pts_dists in enumerate(results):
         sparseness[id] = val_pts_dists[0]
@@ -294,7 +319,7 @@ def _dsc_base(
     all_pts_core_dists, intraclust_condensedMRD = APCD_condensedMRD(cluster)
 
     # Optimization: generic Kruskal-based MST builder is replaced with Prim's-based implementation.
-    # MST builder is further customized to work on condensed MRD matrix.
+    # MST builder is further customized in Cython to work on condensed MRD matrix.
     nodes, edges = mst_linkage_core_condensed(intraclust_condensedMRD)
 
     # Core points are defined as vertices with more than one incident edge in the MST.
@@ -360,93 +385,51 @@ def intercluster_analysis(
     - npt.NDArray[np.floating]:
         Sparseness value for each cluster.
 
-
-    WORKHORSE: https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.KDTree.html
-
     """
 
     separation = np.empty(N_clust, dtype=FLOAT_DTYPE)
 
     # all core-points
-    Tree = cKDTree(core_cluster_sort)
+    Tree = cKDTree(
+        core_cluster_sort,
+        copy_data=False,
+        compact_nodes=True, balanced_tree=True,
+    )
+
     n_jobs = kwargs.get("n_jobs", 1)
 
     for id, cluster in enumerate(core_cluster_groups):
         # [start,end) corresponds to current label in core_cluster_sort
         start, end = core_cluster_bounds[id], core_cluster_bounds[id + 1]
         cluster_core_size = end - start 
-        rows = np.arange(cluster_core_size)
         query_core_dists = core_dists_arr[start: end]
 
-        # k is chosen such that each query must return atleast one neighbor with different cluster label.
-        # We have preprocessed the data via _format_data() such that,
-        #   no. of clusters >= 2
-        #   each cluster having >= 3 nodes, i.e. atleast one core point
-        # So, k = cluster_core_size + 1 works without fail.
-        NN_dists, NN_indices = Tree.query(
-            cluster, 
-            k=cluster_core_size + 1,
-            workers=n_jobs,
-        )
+        # Optimization: our custom C++ implementation to handle k-nn search 
+        # with index filter.
+        # no post-processing required. 
+        NN_out_dists, NN_out_idx = (
+            Tree.query_sqeuclidean_exact(
+                cluster, 
+                k=1,
+                excludeIDx=(start, end),
+                workers=n_jobs,
+            )
+        ) # each output has shape (cluster_core_size, 1)
 
-        ## ----- Should we build separate tree per cluster ?? ------------------
-        # N = no. of core points
-        # p = no. of clusters
-        # d = dimensions <-- fix for both approaches
-        # N = sum(N_i)
-
-        # TREE BUILDING COST : O(N * logN) 
-        # --------------------
-        #    per-cluster wins over global tree in terms of tree building.
-        #        sum_i{N_i * logN_i} < N * logN 
-        #
-        # k-NN QUERY COST : O(logN + k) / query
-        # -----------------
-        #    Global approach : 
-        #    [step-1] for cluster i, we have to choose k = N_i + 1 to ensure atleast one outside cluster neighbor.
-        #        for all observations combined,
-        #        sum_i{N_i * (logN + N_i)} 
-        #    [step-2] out of the k neighbors per query, find the closest outside neighbor.
-        #        sum_i{N_i * N_i}
-        #
-        #    per-cluster approach : 
-        #    [step-1] for cluster i, we have loop over j != i, with k = 1 suffices.
-        #        for all observations combined,
-        #        sum_i{N_i * sum_j_neq_i{logN_j}} <---- can be pretty large as (logx + logy + ...) > log(x+y+...)
-        #    [step-2] out of the p - 1 outside neighbors per query, find the closest one.
-        #        sum_i{N_i * p} 
-
-        # Unless p is very small compared to N_i (i.e. you have a handfew of very large clusters),
-        # the additional development effort of per-cluster approach with python-loop overhead is not justified, 
-        # over the optimized C++ based available global implementation.
-        #
-        # Note: query_ball_point(...) is effiectively applicable on a small fraction of points, hence not compared here.
-        # ------------------------------------
-
-        # Optimization: The nearest outside neighbor for each core point with respect to Euclidean distance is selected 
-        # using a vectorized operation; no Python loop is required.
-        # This utilizes the fact that cKDTree.query() returns neighbors in increasing order of distance for each query point,
-        # hence the first point in a row outside [start,end) is the nearest outside neighbor for that query.
-        NN_out_idx = np.argmax(
-            ~(
-                (NN_indices >= start) &
-                (NN_indices < end)
-            ), axis=1,
-        )
-
-        # Compute the mutual-reachability distance for each core point and its nearest (euclidean distance) 
+        # Compute the mutual-reachability distance for each core point and its nearest (sqeuclidean distance) 
         # outside-cluster neighbour.
+        # The intraclust_condensedMRD's are not useful here, as we need inter-cluster comparison.
         # Identify which component determines the MRD for each pair:
-        #   0 = Euclidean distance, 1 = inner core distance, 2 = outer core distance.
+        #   0 = square-Euclidean distance, 1 = inner core distance, 2 = outer core distance.
         MRD_arr = np.stack(
             (
-                # euclidean distance
-                NN_dists[rows, NN_out_idx],
+                # sqeuclidean distance
+                NN_out_dists.ravel(),
                 # inner core distance
                 query_core_dists, 
                 # outer core distance
                 core_dists_arr[
-                    NN_indices[rows, NN_out_idx]
+                    NN_out_idx.ravel()
                 ]
             ),
             axis=-1, dtype=FLOAT_DTYPE,
@@ -455,9 +438,11 @@ def intercluster_analysis(
 
         # Optimization: avoid computing max and argmax simultaneously; use argmax to get max.
         #
-        # Use the minimum MRD among the nearest (euclidean distance) outside-cluster neighbours
+        # Use the minimum MRD among the nearest (sqeuclidean distance) outside-cluster neighbours
         # as the initial estimate of cluster separation.
-        init_separation = MRD_arr[rows, MRD_component].min()
+        init_separation = MRD_arr[
+            np.arange(cluster_core_size), MRD_component
+        ].min()
         separation[id] = init_separation
 
         # Identify points requiring the radial check.
@@ -468,7 +453,7 @@ def intercluster_analysis(
         #   We can-not reduce MRD_ij further by changing j for a fix i; always MRD_ik >= c_i.
         #
         # Case-2 : MRD_ij = d_ij
-        #   By design, j is the nearest outside neighbour of i w.r.t. euclidean distance. 
+        #   By design, j is the nearest outside neighbour of i w.r.t. sqeuclidean distance. 
         #   We can-not reduce MRD_ij further by changing j; always MRD_ik >= d_ik >= d_ij
         #
         # Case-3 : MRD_ij = c_j
@@ -479,57 +464,39 @@ def intercluster_analysis(
         #   So, we may achieve MRD_ik <= MRD_ij.
         check_radially = np.flatnonzero(
             (MRD_component == 2)
-            & (MRD_arr[:, 0] < init_separation)
+            & (NN_out_dists.ravel() < init_separation)
         )
 
         if not len(check_radially): 
-            continue
+            continue # closest sqeuclidean neighbor is already closest MRD neighbor
         else:  
-            radial_check = Tree.query_ball_point(
-                cluster[check_radially],
-                r=init_separation,
-                return_sorted=False,
-                workers=n_jobs,
-            )
+            # Optimization: our custom C++ implementation to handle k-nn search 
+            # with index filter.
+            # no post-processing required. 
+            neighbors_new_pooled, neighbors_new_offsets = (
+                Tree.query_ball_point_sqeuclidean_exact(
+                    cluster[check_radially],
+                    r_sqeuclidean=init_separation,
+                    excludeIDx=(start, end),
+                    workers=n_jobs,
+                ) 
+            ) # outputs are in CSR adjacency-list representation
 
-        # Optimization: Tree.query_ball_point() returns an object array of List[int].
-        # Instead of doing same calculations in a loop once per query point,
-        # flatten the arraay once and utilize numpy vectorized operations for the heavylifting.
-        query = []
-        neighbors_new = []
-        for i, k in zip(check_radially, radial_check):
-            l = len(k)
-            if not l : continue 
-
-            neighbors_new.extend(k)
-            query.extend(l * [i])
-
-        if neighbors_new:
-            neighbors_new = np.array(neighbors_new, dtype=IDX_DTYPE)
-            outer_core_pts_new = ~(
-                (neighbors_new >= start) &
-                (neighbors_new < end)
-            )
-
-            if outer_core_pts_new.any():
-                neighbors_new = neighbors_new[outer_core_pts_new]  
-                query = np.fromiter(
-                    compress(query, outer_core_pts_new),
-                    dtype=IDX_DTYPE,
-                    count=outer_core_pts_new.sum(),
-                ) # expecting only a small fraction of query to be selected
-
+            if len(neighbors_new_pooled):
+                query_indices_expanded = np.repeat(
+                    check_radially, 
+                    np.diff(neighbors_new_offsets),
+                ) # expanded query indices, row-by-row correspondence with neighbors_new_pooled
+                diff = cluster[query_indices_expanded] - core_cluster_sort[neighbors_new_pooled]
                 MRD_NN_out_updated = np.maximum.reduce(
                     (
-                        # euclidean distance
-                        np.linalg.norm(
-                            cluster[query] - core_cluster_sort[neighbors_new],
-                            axis=1,
-                        ),
+                        # sqeuclidean distance, not euclidean distance;
+                        # avoid the cost of redundant sqrt(...) ---> **2 and intermediate peak memory
+                        np.einsum('ij,ij->i', diff, diff),
                         # inner core distance
-                        query_core_dists[query],
+                        query_core_dists[query_indices_expanded],
                         # outer core distance
-                        core_dists_arr[neighbors_new]
+                        core_dists_arr[neighbors_new_pooled]
                     )
                 ).min()
 
@@ -540,20 +507,6 @@ def intercluster_analysis(
 
     return separation
 
-
-
-## ------------ What's Next ? -------------------------
-
-# KD-Tree is not label-aware.
-# So, to ensure we get neighbor from different cluster label,
-# we use k = current_cluster_size + 1 as buffer in Tree.query(...), followed by immediate post-processing.
-
-# When data is label-sorted, a cluster is an Index range [start, end).
-# We can patch cKDTree(...) to do that Index filtering in C++ before returning the output,
-# and set k = 1, our exact desired value.
-# It can reduce the intermediate memory wastage, while the total complexity remains the same.
-
-# -------------------------------
 
 
 ## =======================================================
