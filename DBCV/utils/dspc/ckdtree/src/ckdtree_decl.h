@@ -24,6 +24,46 @@ License: 3-clause BSD
 
 
 
+
+/* 
+* =================================================================
+OUR CONTRIBUTION @idnantimar
+----------------
+
+    We introduce an additional exclude filter on Index during search traversal,
+    rather than returning unfiltered results and performing post-processing.
+
+    The combined time complexity of search + filtering remains the same in the worst case
+    (as we are doing the same job with a different execution order),
+    but the advantages are:
+
+    [1.] Integer index comparison is almost always cheaper than floating-point distance calculations.
+        When we know in advance which indices are not required,
+        we can short-circuit the corresponding iterations in the brute-force loop of leaf nodes,
+        thereby reducing the average runtime.
+
+    [2.] As we no longer need to store 'to be excluded' points in the output,
+        peak memory usage is reduced.
+
+* ==============================================================
+*/
+static inline bool
+is_allowed(
+    const ckdtree_intp_t idx,
+    const ckdtree_intp_t excludeIDx_start = 0,
+    const ckdtree_intp_t excludeIDx_end = 0
+)
+{
+    return (idx >= excludeIDx_end) || (idx < excludeIDx_start);
+}
+
+// shared by both k-NN and radius search leaf-loop filtering.
+
+// ---------------------------------------
+
+
+
+
 /* 
 * =================================================================
 * Build methods in C++ for better speed and GIL release.
@@ -96,8 +136,8 @@ query_single_point_sqeuclidean_exact( // [[k-NN SEARCH]]
     const double *x, // pointer to query (single observation)
     const ckdtree_intp_t kmax, // number of neighbors
     double distance_upper_bound_sqeuclidean, // distance upper cap
-    const ckdtree_intp_t excludeIDx_start,
-    const ckdtree_intp_t excludeIDx_end 
+    const ckdtree_intp_t excludeIDx_start = 0,
+    const ckdtree_intp_t excludeIDx_end = 0
     // only indices outside the range [excludeIDx_start, excludeIDx_end) will be consired as candidate neighbors.
     // default is [0,0) for no exclusion.
 );
@@ -109,8 +149,8 @@ query_single_point_ball_sqeuclidean_exact( // [[RADIUS SEARCH]]
     const double *x, // pointer to query (single observation)
     const double r_sqeuclidean, // square-Euclidean radius
     std::vector<ckdtree_intp_t> *result_indices, // pointer to matched neighbor indices output
-    const ckdtree_intp_t excludeIDx_start,
-    const ckdtree_intp_t excludeIDx_end
+    const ckdtree_intp_t excludeIDx_start = 0,
+    const ckdtree_intp_t excludeIDx_end = 0
     // only indices outside the range [excludeIDx_start, excludeIDx_end) will be considered as candidate neighbors.
     // default is [0,0) for no exclusion.
 );

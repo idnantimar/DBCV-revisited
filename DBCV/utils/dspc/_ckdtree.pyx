@@ -22,7 +22,7 @@ OUR CONTRIBUTION: @idnantimar
     [1.] Integer index comparison is almost always cheaper than floating-point distance calculations.
         When we know in advance which indices are not required,
         we can short-circuit the corresponding iterations in the brute-force loop of leaf nodes,
-        thereby reducing average runtime.
+        thereby reducing the average runtime.
 
     [2.] As we no longer need to store 'to be excluded' points in the output,
         peak memory usage is reduced.
@@ -80,7 +80,9 @@ cdef extern from "ckdtree_decl.h":
         np.intp_t size    # number of nodes in the tree
 
 
-    int build_ckdtree( # [[THE ACTUAL BUILD ROUTINE]]
+    int build_ckdtree( 
+        # [[THE ACTUAL BUILD ROUTINE]]
+
         ckdtree *self,
         np.intp_t start_idx,
         np.intp_t end_idx,
@@ -88,6 +90,7 @@ cdef extern from "ckdtree_decl.h":
         np.float64_t *mins,
         int _median,
         int _compact
+
     ) except + nogil
 
 
@@ -145,7 +148,7 @@ cdef class cKDTree:
         [1.] Integer index comparison is almost always cheaper than floating-point distance calculations.
             When we know in advance which indices are not required,
             we can short-circuit the corresponding iterations in the brute-force loop of leaf nodes,
-            thereby reducing average runtime.
+            thereby reducing the average runtime.
 
         [2.] As we no longer need to store 'to be excluded' points in the output,
             peak memory usage is reduced.
@@ -205,7 +208,7 @@ cdef class cKDTree:
     # Build:
 
     # DO NOT MODIFY SciPy's implementation in this section.
-    # [CRUCIAL FOR UPSTREAM CONSISTENCY IN FUTURE]
+    # [[CRUCIAL FOR UPSTREAM CONSISTENCY IN FUTURE]]
     # ==============================================================
 
     cdef:
@@ -258,7 +261,7 @@ cdef class cKDTree:
 
         if not copy_data: 
             copy_data = None 
-        # [[REMOVED DEPENDANCY: scipy._lib._util copy_if_needed is replaced with native numpy equivalent.]]
+        # [REMOVED DEPENDANCY: scipy._lib._util copy_if_needed is replaced with native numpy equivalent.]
         data = np.array(data, order='C', copy=copy_data, dtype=np.float64)
 
         # read-only view so ban people modifying tree.data after the tree is
@@ -267,8 +270,9 @@ cdef class cKDTree:
         data.flags.writeable = False
 
         if data.ndim != 2:
-            raise ValueError("data must be of shape (n, m), where there are "
-                             "n points of dimension m")
+            raise ValueError(
+                "data must be of shape (n, m), where there are n points of dimension m"
+            )
 
         if not np.isfinite(data).all():
             raise ValueError("data must be finite, check for nan or inf values")
@@ -472,7 +476,7 @@ cdef class cKDTree:
     def query_ball_point_sqeuclidean_exact(
             cKDTree self, 
             object x, 
-            np.double_t r_sqeuclidean = DBL_MAX,
+            np.double_t r_sqeuclidean,
             tuple excludeIDx = (0, 0),
             object workers = None,
         ):
@@ -484,7 +488,7 @@ cdef class cKDTree:
         x : array_like
             An array of points to query, where each row is an observation.
             NOTE: single query must be reshaped as ``(1, -1)`` format.
-        r_sqeuclidean : nonnegative float, optional
+        r_sqeuclidean : nonnegative float
             Return neighbors within this square-Euclidean distance.  
         excludeIDx : tuple, optional
             Exclude a range of observation id ``[start, end)`` from search process.
@@ -496,7 +500,7 @@ cdef class cKDTree:
         flat_indices : ndarray of intp, shape ``(total_matches,)``
             All matched neighbor indices, concatenated across every query point.
         offsets : ndarray of intp, shape ``(n_query + 1,)``
-            Point i's matches are ``flat_indices[offsets[i]:offsets[i+1]]``.
+            Point i's matches are ``flat_indices[offsets[i]: offsets[i+1]]``.
 
         [see, CSR adjacency-list representation]
 
@@ -596,7 +600,7 @@ cdef _run_threads(_thread_func, np.intp_t n, workers: object):
             n,
             workers if workers > 0 else (os.cpu_count() + workers + 1)
         )
-        ranges = [
+        ranges = [# creates batches, rather than one thread per query
             (j * n // n_jobs, (j + 1) * n // n_jobs)
             for j in range(n_jobs)
         ]
@@ -610,8 +614,9 @@ cdef tuple validate_shape(np.ndarray x, np.intp_t pdim) except *:
     Validates that x is 2D and each row has length pdim.
     """
     if x.ndim != 2 or x.shape[1] != pdim:
-        raise ValueError("x must be 2D with rows of length {} but "
-                         "has shape {}".format(pdim, np.shape(x)))
+        raise ValueError(
+            "x must be 2D with rows of length {} but has shape {}".format(pdim, np.shape(x))
+        )
     return x.shape[0], x.shape[1]
 
 

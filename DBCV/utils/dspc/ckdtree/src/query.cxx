@@ -25,7 +25,7 @@ OUR CONTRIBUTION @idnantimar
     [1.] Integer index comparison is almost always cheaper than floating-point distance calculations.
         When we know in advance which indices are not required,
         we can short-circuit the corresponding iterations in the brute-force loop of leaf nodes,
-        thereby reducing average runtime.
+        thereby reducing the average runtime.
 
     [2.] As we no longer need to store 'to be excluded' points in the output,
         peak memory usage is reduced.
@@ -39,7 +39,7 @@ OUR CONTRIBUTION @idnantimar
 #include <vector>
 #include <algorithm>
 #include <limits>
-
+#include <utility>
 
 
 
@@ -87,8 +87,8 @@ struct heap {
         ckdtree_intp_t i_parent = (i - 1)>>1; // parent of i
         heapitem t;
         
-        ++n; // ensure buffer is not full, before insert
-        if (n > space) {
+        // ensure buffer is not full, before insert
+        if (++n > space) {
             _heap.resize(2*space+1);
             space = _heap.size();
         }
@@ -96,9 +96,7 @@ struct heap {
 
         // this block is only executed when at least one element exists.
         while ((i > 0) && (_heap[i].priority < _heap[i_parent].priority)) {
-            t = _heap[i_parent];
-            _heap[i_parent] = _heap[i];
-            _heap[i] = t;
+            std::swap(_heap[i_parent], _heap[i]);
             i = i_parent;
             i_parent = (i - 1)>>1;
         }
@@ -112,7 +110,6 @@ struct heap {
          * then sift it downward until the heap structure is restored.     
         */
 
-        heapitem t;
         ckdtree_intp_t i = 0; // current position
         ckdtree_intp_t i_left = 1; // left child of i
         ckdtree_intp_t i_right; // right child of i
@@ -127,9 +124,7 @@ struct heap {
 
                 if (_heap[i_new].priority >= _heap[i].priority) break;
 
-                t = _heap[i_new];
-                _heap[i_new] = _heap[i];
-                _heap[i] = t;
+                std::swap(_heap[i_new], _heap[i]);
                 i = i_new;
                 i_left = 2*i + 1;
             }
@@ -214,7 +209,7 @@ struct nodeinfo_pool {/*THE GOOD OLD STRUCT HACK*/
         alloc_size = 64*(alloc_size/64)+64; 
         arena_size = (64*alloc_size)+4096; 
 
-        // allocate an array of arena_size bytes in heap memory,
+        // allocate an array of arena_size bytes in memory,
         // and store its starting address in arena
         arena = new char[arena_size];
         arena_ptr = arena;
@@ -310,7 +305,8 @@ query_single_point_sqeuclidean_exact(
     nodeinfo *current_node;
     nodeinfo *far_node;
     double dist_sq, side_distance;
-    heapitem queue_item, far_item, candidate_neighbor;
+    heapitem queue_item, far_item;
+    heapitem candidate_neighbor;
     const ckdtreenode *leaf_node;
     const ckdtreenode *internal_node;
 
@@ -344,7 +340,7 @@ query_single_point_sqeuclidean_exact(
                 // default is [0,0) for no exclusion.
                 // filter using the cheap integer comparison first,
                 // to avoid wasting relatively expensive distance calculations.
-                if ((idx < excludeIDx_start) || (idx >= excludeIDx_end)) {
+                if (is_allowed(idx, excludeIDx_start, excludeIDx_end)) {
 
                     dist_sq = MinkowskiDistP2sq::point_point_p2(
                         data + m * idx, x,

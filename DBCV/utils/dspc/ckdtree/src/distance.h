@@ -156,7 +156,6 @@ struct MinkowskiDistP2sq {
             double min_, max_;
 
             PlainDist1D::interval_interval(rect1, rect2, i, &min_, &max_);
-
             *min += min_ * min_;
             *max += max_ * max_;
         }

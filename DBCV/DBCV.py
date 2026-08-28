@@ -71,7 +71,7 @@ def DBCV_score(
 
     per_cluster_scores : bool, default=False
         If True, return the individual DBCV score for each cluster in addition to the aggregate DBCV score. 
-        If False, only the aggregate DBCV score is returned and the second return value is None.
+        If False, only the aggregate DBCV score is returned.
 
     n_jobs : parameters to pass to the `joblib.Parallel(...)`.
 
@@ -95,7 +95,7 @@ def DBCV_score(
     separation = 0, sparseness > 0 : cluster_scores[i] = -1 ; heuristically the worst case
 
     separation = 0, sparseness = 0 : cluster_scores[i] not defined in the original paper by Moulavi et al.
-        The existing HDBSCAN implementation also does not suggest any fallback.
+        The existing implementations also does not suggest any fallback.
         In such case, NumPy raises a RuntimeWarning and 
         we return None for the aggregate DBCV score and individual cluster scores are returned for downstream diagnostics.
               
@@ -116,7 +116,7 @@ def DBCV_score(
             "labels must be a 1-D array of shape (n_samples,)"
         )
 
-    if X.shape[0] != labels.shape[0]:
+    if X.shape[0] != len(labels):
         raise ValueError(
             "X and labels must contain the same number of observations"
         )
@@ -212,10 +212,11 @@ def _weighted_score(
         )
         DBCV_val = None
         per_cluster_scores = True
-    else: DBCV_val = np.sum(
-        (np.diff(cluster_bounds) / n_samp) *
-        cluster_scores
-    ).item()
+    else: 
+        DBCV_val = np.sum(
+            (np.diff(cluster_bounds) / n_samp) *
+            cluster_scores
+        ).item()
 
     return ( 
         DBCV_val
@@ -397,15 +398,13 @@ def intercluster_analysis(
     )
 
     n_jobs = kwargs.get("n_jobs", 1)
-
     for id, cluster in enumerate(core_cluster_groups):
         # [start,end) corresponds to current label in core_cluster_sort
         start, end = core_cluster_bounds[id], core_cluster_bounds[id + 1]
         cluster_core_size = end - start 
         query_core_dists = core_dists_arr[start: end]
 
-        # Optimization: our custom C++ implementation to handle k-nn search 
-        # with index filter.
+        # Optimization: our custom C++ implementation to handle k-nn search with index filter.
         # no post-processing required. 
         NN_out_dists, NN_out_idx = (
             Tree.query_sqeuclidean_exact(
@@ -418,7 +417,7 @@ def intercluster_analysis(
 
         # Compute the mutual-reachability distance for each core point and its nearest (sqeuclidean distance) 
         # outside-cluster neighbour.
-        # The intraclust_condensedMRD's are not useful here, as we need inter-cluster comparison.
+        # The intraclust_condensedMRD's are not useful here, as we need inter-cluster comparisons.
         # Identify which component determines the MRD for each pair:
         #   0 = square-Euclidean distance, 1 = inner core distance, 2 = outer core distance.
         MRD_arr = np.stack(
@@ -436,16 +435,15 @@ def intercluster_analysis(
         )
         MRD_component = MRD_arr.argmax(axis=1)
 
-        # Optimization: avoid computing max and argmax simultaneously; use argmax to get max.
-        #
         # Use the minimum MRD among the nearest (sqeuclidean distance) outside-cluster neighbours
         # as the initial estimate of cluster separation.
+        # Optimization: avoid computing max and argmax simultaneously; use argmax to get max.
         init_separation = MRD_arr[
             np.arange(cluster_core_size), MRD_component
         ].min()
         separation[id] = init_separation
 
-        # Identify points requiring the radial check.
+        # Identify points requiring a validation.
         # We shorlisted outer-core point j by euclidean distance d_ij, for each inner-core point i.
         #   MRD_ij = max(d_ij, c_i, c_j) 
         #
@@ -460,7 +458,7 @@ def intercluster_analysis(
         #   This is where we have scope of improvements.
         #   When (d_ij < init_separation) & (MRD_ij = c_j >= d_ij), 
         #   there can be potentially an outer-core point k having
-        #   (d_ij <= d_ik < init_separation) but (MRD_ij = c_j >= c_k).
+        #   (d_ij <= d_ik < init_separation) but (c_k <= c_j = MRD_ij).
         #   So, we may achieve MRD_ik <= MRD_ij.
         check_radially = np.flatnonzero(
             (MRD_component == 2)
@@ -470,8 +468,7 @@ def intercluster_analysis(
         if not len(check_radially): 
             continue # closest sqeuclidean neighbor is already closest MRD neighbor
         else:  
-            # Optimization: our custom C++ implementation to handle k-nn search 
-            # with index filter.
+            # Optimization: our custom C++ implementation to handle k-nn search with index filter.
             # no post-processing required. 
             neighbors_new_pooled, neighbors_new_offsets = (
                 Tree.query_ball_point_sqeuclidean_exact(
@@ -490,7 +487,7 @@ def intercluster_analysis(
                 diff = cluster[query_indices_expanded] - core_cluster_sort[neighbors_new_pooled]
                 MRD_NN_out_updated = np.maximum.reduce(
                     (
-                        # sqeuclidean distance, not euclidean distance;
+                        # sqeuclidean distance directly, not euclidean distance;
                         # avoid the cost of redundant sqrt(...) ---> **2 and intermediate peak memory
                         np.einsum('ij,ij->i', diff, diff),
                         # inner core distance
@@ -591,8 +588,8 @@ def _format_data(
     # Optimization: avoid hstack([X, labels]) as it allocates new memory, which is wasteful for large X.
     # Work on existing X and labels: WITH CAUTION - No Mutation.
     # The final label information is fully recoverable from cluster_bounds.
-    sort_order = labels.argsort()
-    X, labels = X[sort_order], labels[sort_order]
+    sort_order = labels.argsort(stable=True)
+    X, labels = X[sort_order], labels[sort_order] # stable sort to avoid run on run fluctuations
 
     # Sorting the labels does not change their counts.
     # if noise exists, it will be the very first cluster in the sorted output.
@@ -611,7 +608,7 @@ def _format_data(
 
     # Following the R dbscan implementation, 
     # reassign non-noise clusters containing fewer than 3 points to noise, 
-    # since such clusters cannot contain internal (degree > 1) MST vertices.
+    # since such clusters contain no internal (degree > 1) MST vertices.
     cluster_sizes = np.diff(cluster_bounds)
     small_clusters = (cluster_sizes < 3)
 
@@ -653,7 +650,7 @@ def _format_data(
     # cluster_bounds is of len (N_clust + 1):
     #   [0, start_index_1, start_index_2, ..., start_index_last, N]
     # where first & last elements are first & last row id of cluster_sort.
-    # Use the intermediate points to splits the data in N_clust groups.
+    # Use the intermediate points to split the data in N_clust groups.
     cluster_groups = np.vsplit(
         cluster_sort,
         cluster_bounds[1: -1], 

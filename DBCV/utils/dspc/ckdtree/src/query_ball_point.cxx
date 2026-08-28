@@ -28,7 +28,7 @@ OUR CONTRIBUTION @idnantimar
     [1.] Integer index comparison is almost always cheaper than floating-point distance calculations.
         When we know in advance which indices are not required,
         we can short-circuit the corresponding iterations in the brute-force loop of leaf nodes,
-        thereby reducing average runtime.
+        thereby reducing the average runtime.
 
     [2.] As we no longer need to store 'to be excluded' points in the output,
         peak memory usage is reduced.
@@ -70,18 +70,6 @@ struct qR_stack_item {
 const ckdtree_intp_t LESS = 1;
 const ckdtree_intp_t GREATER = 2;
 
-// only indices outside the range [excludeIDx_start, excludeIDx_end) will be considered as candidate neighbors.
-// default as [0,0) for no exclusion.
-static inline bool
-is_allowed(
-    const ckdtree_intp_t idx,    
-    const ckdtree_intp_t excludeIDx_start,
-    const ckdtree_intp_t excludeIDx_end
-)
-{
-    return (idx >= excludeIDx_end) || (idx < excludeIDx_start) ;
-}
-
 
 
 /* ==================================
@@ -91,7 +79,7 @@ is_allowed(
  * but their own implementation initializes inaccurate_distance_limit = max_distance;
  *
  * since the distance along any dimension to any subtree can never exceed the global maximum,
- * the incremental rule never fires and always performs brute-force recomputation.
+ * the incremental rule never fires and always performs distance recomputation.
  *
  * [ we have simply removed that dead branch,
  *   unless we decide on some heuristic for the inaccurate_distance_limit threshold,
@@ -166,7 +154,7 @@ struct query_to_Rectangle_Tracker_sqeuclidean_exact {
         // bounding hyperbox of a child node overlaps with its parent's at every axis except split_dim.
     ) {
  
-        // before push ensure there is enough room
+        // before push, ensure there is enough room
         if (stack_size == stack_max_size) _resize_stack();
  
         // state at the moment of split;
@@ -267,7 +255,7 @@ traverse_checking(
         // so, a flat loop suffices rather than recursion over its children.
 
         // in brute-force loop of leaf nodes SciPy uses `<=` check.
-        // so, in bulk-inclusion check also `<` is replaced with `<=` without any change in behaviour.
+        // so, in bulk-inclusion check also `<` is replaced safely with `<=` without any change in behaviour.
 
     }
     else {// INDECISIVE CALL
