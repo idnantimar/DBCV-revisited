@@ -108,6 +108,14 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
 
     if n < 2: return None, None
 
+    if d > 25: # a guard-rail for underflow; overflow is validated explicitly at the end
+        raise ValueError(
+            """
+            This float64 implementation supports only d <= 25.  
+            For higher dimensions, reimplement the same APCD accumulation logic using float128.
+            """
+        )
+
     cdef np.intp_t n_1 = n - 1
     cdef np.double_t p = -1.0 / d
 
@@ -122,7 +130,8 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
     cdef np.double_t *mrd = <np.double_t *> mrd_arr.data
 
     cdef np.intp_t i, j, k, idx
-    cdef np.double_t dist_sq, diff, w
+    cdef np.double_t dist_sq, diff, w, mean_w
+    cdef np.intp_t bad_idx = -1
 
     cdef np.double_t *X_i
     cdef np.double_t *X_j
@@ -155,20 +164,68 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
 
             X_i += d
 
+        # HOW apcd ACCUMULATION WORKS HERE: np.float64 works in a scale of 4.94e-324 to 1.80e+308
+        # ---------------------------------------------------------------------------------------
+            #   [case-1] : dist_sq either exact zero or extremely close to zero 
+            #
+            #       dist_sq**d = 0. --> w = inf --> (apcd / n_1) ** -1/d = 0.
+            #
+            #       i.e. when two points have no practically meaningful distance,
+            #       APCD collapses to zero for both of them.
+            #   
+            #   range to collapse :-
+            #       dist_sq < 3.42e-07 if d = 50
+            #       dist_sq < 1.17e-13 if d = 25
+            #       dist_sq < 4.67e-33 if d = 10   
+
+            #   [case-2] : dist_sq extremely large
+            #
+            #       dist_sq**d = inf --> w = 0 --> (apcd / n_1) ** -1/d = inf
+            #
+            #       i.e. when there is an extreme outlier,
+            #       APCD becomes infinity for that observation. 
+            #
+            #   range to collapse :-
+            #       dist_sq > 1.46e+06 if d = 50
+            #       dist_sq > 2.14e+12 if d = 25
+            #       dist_sq > 6.69e+30 if d = 10
+
+        # Optimization: instead of validating O(n^2) loop, it is much cheaper to validate O(n) loop.
         for i in range(n):
-            apcd[i] = (apcd[i] / n_1) ** p
+            mean_w = apcd[i] / n_1
+            if mean_w:
+                apcd[i] = (mean_w) ** p
+            else:
+                bad_idx = i
+                break
 
         # Second pass: construct MRD.
-        idx = 0
-        for i in range(n - 1): # row id i
-            apcd_i = apcd[i]
+        if bad_idx == -1:
+            idx = 0
+            for i in range(n - 1): # row id i
+                apcd_i = apcd[i]
 
-            for j in range(i + 1, n): # column id j ; i < j
-                mrd[idx] = MAX_DOUBLE(
-                    mrd[idx],
-                    MAX_DOUBLE(apcd_i, apcd[j])
-                )
+                for j in range(i + 1, n): # column id j ; i < j
+                    mrd[idx] = MAX_DOUBLE(
+                        mrd[idx],
+                        MAX_DOUBLE(apcd_i, apcd[j])
+                    )
 
-                idx += 1
+                    idx += 1
+
+    # Overflow detection is necessary,
+    # because an overflow makes the corresponding APCD value infinite, 
+    # leaving the MRD graph disconnected 
+    # (at least one node remains at infinite distance from all others); 
+    # so an MST cannot be constructed (you will get spanning forest).
+    if bad_idx != -1:
+        raise ValueError(
+            f"""
+                APCD accumulation overflowed for point {bad_idx}.
+                An outlier may be present, or try scaling down the data.
+            """
+        )
 
     return apcd_arr, mrd_arr
+
+
