@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 830" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrowSlate" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8592B0"/>
+    </marker>
+    <marker id="arrowCoral" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F96167"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="830" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="600" y="38" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="26" font-weight="bold" fill="#1E2761">DSC Workflow — Naive vs. Our Optimization</text>
+  <text x="600" y="62" text-anchor="middle" font-size="14" fill="#5B6B8C" font-style="italic">for cluster i, with nᵢ observations</text>
+
+  <!-- Column headers -->
+  <rect x="40" y="90" width="540" height="42" rx="8" fill="#F1F3F8" stroke="#C9D2E3" stroke-width="1"/>
+  <text x="310" y="117" text-anchor="middle" font-size="17" font-weight="bold" fill="#5B6B8C">EXISTING (NAIVE)</text>
+
+  <rect x="620" y="90" width="540" height="42" rx="8" fill="#FCE9E9" stroke="#F4B4B4" stroke-width="1"/>
+  <text x="890" y="117" text-anchor="middle" font-size="17" font-weight="bold" fill="#C13F44">DBCV-REVISITED (OURS)</text>
+
+  <!-- ================= LEFT COLUMN ================= -->
+  <!-- connecting arrows -->
+  <line x1="310" y1="280" x2="310" y2="300" stroke="#8592B0" stroke-width="2" marker-end="url(#arrowSlate)"/>
+  <line x1="310" y1="410" x2="310" y2="430" stroke="#8592B0" stroke-width="2" marker-end="url(#arrowSlate)"/>
+  <line x1="310" y1="540" x2="310" y2="560" stroke="#8592B0" stroke-width="2" marker-end="url(#arrowSlate)"/>
+
+  <!-- Step 1 -->
+  <g>
+    <rect x="40" y="170" width="540" height="110" rx="10" fill="#F1F3F8" stroke="#C9D2E3" stroke-width="1.5"/>
+    <circle cx="80" cy="200" r="18" fill="#8592B0"/>
+    <text x="80" y="206" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">1</text>
+    <text x="112" y="198" font-size="17" font-weight="bold" fill="#1E2761">Euclidean Distance Matrix</text>
+    <text x="112" y="220" font-size="13" fill="#5B6B8C">Full dense nᵢ × nᵢ pairwise-distance matrix</text>
+    <rect x="112" y="238" width="110" height="26" rx="13" fill="#E4E8F1"/>
+    <text x="167" y="255" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#4A5578">O(nᵢ²)</text>
+  </g>
+
+  <!-- Step 2 -->
+  <g>
+    <rect x="40" y="300" width="540" height="110" rx="10" fill="#F1F3F8" stroke="#C9D2E3" stroke-width="1.5"/>
+    <circle cx="80" cy="330" r="18" fill="#8592B0"/>
+    <text x="80" y="336" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">2</text>
+    <text x="112" y="328" font-size="17" font-weight="bold" fill="#1E2761">All-Points-Core-Distance</text>
+    <text x="112" y="350" font-size="13" fill="#5B6B8C">One core-distance value per observation</text>
+    <rect x="112" y="368" width="90" height="26" rx="13" fill="#E4E8F1"/>
+    <text x="157" y="385" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#4A5578">O(nᵢ)</text>
+  </g>
+
+  <!-- Step 3 -->
+  <g>
+    <rect x="40" y="430" width="540" height="110" rx="10" fill="#F1F3F8" stroke="#C9D2E3" stroke-width="1.5"/>
+    <circle cx="80" cy="460" r="18" fill="#8592B0"/>
+    <text x="80" y="466" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">3</text>
+    <text x="112" y="458" font-size="17" font-weight="bold" fill="#1E2761">Mutual-Reachability Distance</text>
+    <text x="112" y="480" font-size="13" fill="#5B6B8C">New dense nᵢ × nᵢ MRD matrix, allocated fresh</text>
+    <rect x="112" y="498" width="110" height="26" rx="13" fill="#E4E8F1"/>
+    <text x="167" y="515" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#4A5578">O(nᵢ²)</text>
+  </g>
+
+  <!-- Step 4 -->
+  <g>
+    <rect x="40" y="560" width="540" height="110" rx="10" fill="#F1F3F8" stroke="#C9D2E3" stroke-width="1.5"/>
+    <circle cx="80" cy="590" r="18" fill="#8592B0"/>
+    <text x="80" y="596" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">4</text>
+    <text x="112" y="588" font-size="17" font-weight="bold" fill="#1E2761">Minimum Spanning Tree</text>
+    <text x="112" y="610" font-size="13" fill="#5B6B8C">Prim's algorithm — requires a dense nᵢ × nᵢ input</text>
+    <rect x="112" y="628" width="130" height="26" rx="13" fill="#E4E8F1"/>
+    <text x="177" y="645" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#4A5578">O(nᵢ − 1)</text>
+  </g>
+
+  <!-- Left total -->
+  <g>
+    <rect x="40" y="700" width="540" height="100" rx="10" fill="#E9ECF3" stroke="#C9D2E3" stroke-width="1.5"/>
+    <text x="310" y="730" text-anchor="middle" font-size="14" fill="#5B6B8C">Total space per cluster</text>
+    <text x="310" y="762" text-anchor="middle" font-size="20" font-family="Menlo, Consolas, monospace" font-weight="bold" fill="#4A5578">O(2nᵢ² + 2nᵢ − 1)</text>
+  </g>
+
+  <!-- ================= RIGHT COLUMN ================= -->
+  <line x1="890" y1="280" x2="890" y2="300" stroke="#F96167" stroke-width="2" marker-end="url(#arrowCoral)"/>
+  <line x1="890" y1="540" x2="890" y2="560" stroke="#F96167" stroke-width="2" marker-end="url(#arrowCoral)"/>
+
+  <!-- Step 1 -->
+  <g>
+    <rect x="620" y="170" width="540" height="110" rx="10" fill="#FFF8F5" stroke="#F4B4B4" stroke-width="1.5"/>
+    <circle cx="660" cy="200" r="18" fill="#F96167"/>
+    <text x="660" y="206" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">1</text>
+    <text x="692" y="198" font-size="17" font-weight="bold" fill="#1E2761">Condensed Distances</text>
+    <text x="692" y="220" font-size="13" fill="#5B6B8C">Upper-triangular block only (SciPy pdist-style)</text>
+    <rect x="692" y="238" width="150" height="26" rx="13" fill="#FCE0DF"/>
+    <text x="767" y="255" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#C13F44">O(nᵢ(nᵢ−1)/2)</text>
+  </g>
+
+  <!-- Step 2 -->
+  <g>
+    <rect x="620" y="300" width="540" height="110" rx="10" fill="#FFF8F5" stroke="#F4B4B4" stroke-width="1.5"/>
+    <circle cx="660" cy="330" r="18" fill="#F96167"/>
+    <text x="660" y="336" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">2</text>
+    <text x="692" y="328" font-size="17" font-weight="bold" fill="#1E2761">All-Points-Core-Distance</text>
+    <text x="692" y="350" font-size="13" fill="#5B6B8C">Computed as is — no change needed here</text>
+    <rect x="692" y="368" width="90" height="26" rx="13" fill="#FCE0DF"/>
+    <text x="737" y="385" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#C13F44">O(nᵢ)</text>
+  </g>
+
+  <!-- Step 3 (fused, reused buffer) -->
+  <g>
+    <rect x="620" y="430" width="540" height="110" rx="10" fill="#FFF3F2" stroke="#F96167" stroke-width="2"/>
+    <circle cx="660" cy="460" r="18" fill="#F96167"/>
+    <text x="660" y="466" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">3</text>
+    <text x="692" y="458" font-size="17" font-weight="bold" fill="#1E2761">Mutual-Reachability Distance</text>
+    <text x="692" y="480" font-size="13" fill="#5B6B8C">Overwrites the Step 1 buffer in place — fused pipeline</text>
+    <rect x="692" y="498" width="150" height="26" rx="13" fill="#F96167"/>
+    <text x="767" y="515" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" font-weight="bold" fill="#FFFFFF">0 (reused)</text>
+  </g>
+  <!-- Step 4 -->
+  <g>
+    <rect x="620" y="560" width="540" height="110" rx="10" fill="#FFF8F5" stroke="#F4B4B4" stroke-width="1.5"/>
+    <circle cx="660" cy="590" r="18" fill="#F96167"/>
+    <text x="660" y="596" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">4</text>
+    <text x="692" y="588" font-size="17" font-weight="bold" fill="#1E2761">Minimum Spanning Tree</text>
+    <text x="692" y="610" font-size="13" fill="#5B6B8C">Custom Prim's — reads the condensed array directly, no squareform()</text>
+    <rect x="692" y="628" width="130" height="26" rx="13" fill="#FCE0DF"/>
+    <text x="757" y="645" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#C13F44">O(nᵢ − 1)</text>
+  </g>
+
+  <!-- Right total -->
+  <g>
+    <rect x="620" y="700" width="540" height="100" rx="10" fill="#FFF3F2" stroke="#F96167" stroke-width="2"/>
+    <text x="890" y="730" text-anchor="middle" font-size="14" fill="#8A4245">Total space per cluster</text>
+    <text x="890" y="762" text-anchor="middle" font-size="20" font-family="Menlo, Consolas, monospace" font-weight="bold" fill="#C13F44">O(nᵢ(nᵢ−1)/2 + 2nᵢ − 1)</text>
+  </g>
+
+  <!-- Center comparison arrow + callout -->
+  <line x1="583" y1="750" x2="617" y2="750" stroke="#1E2761" stroke-width="2.5" marker-end="url(#arrowSlate)"/>
+  <rect x="470" y="806" width="260" height="0" fill="none"/>
+  <g>
+    <rect x="450" y="672" width="300" height="34" rx="17" fill="#1E2761"/>
+    <text x="600" y="694" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">~4× peak-memory reduction</text>
+  </g>
+</svg>
