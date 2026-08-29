@@ -8,14 +8,11 @@
 
 - [Why DBCV?](#why-dbcv)
 - [Available Options](#available-options)
-- [Our Contribution: DSC](#our-contribution-dsc-density-sparseness-of-a-cluster)
-- [Our Contribution: DSPC](#our-contribution-dspc-density-separation-of-a-pair-of-clusters)
+- [Our Contribution](#our-contribution)
 - [How to Use](#how-to-use)
 - [Time & Memory](#time--memory)
 - [Score](#score)
 - [Conclusion](#conclusion)
-- [Appendix](#appendix)
-- [References](#references)
 
 ---
 
@@ -87,6 +84,10 @@ In Python, three notable implementations are:
 3. **[`k-DBCV`](https://github.com/Kaufman-Lab-Columbia/k-DBCV)**
    This implementation introduces a KD-tree-based spatial partitioning strategy in place of brute-force nearest-neighbor search. During our review, however, we identified an implementation inconsistency, which is documented in [Issue #3](https://github.com/Kaufman-Lab-Columbia/k-DBCV/issues/3) and was brought to the author's attention.
 
+---
+
+# OUR CONTRIBUTION
+
 ## Our Contribution: DSC (Density Sparseness of a Cluster)
 
 
@@ -125,15 +126,7 @@ So, we customized the algorithm from scratch to work directly with the condensed
 
 ![DSC workflow: naive vs. our optimization](assets/dsc-workflow.svg)
 
-So, the total space complexity per cluster is reduced:
-
-$$
-O(2n_i^2+2n_i-1)
-\longrightarrow
-O\left(\frac{n_i(n_i-1)}{2}+2n_i-1\right)
-$$
-
-Although both are quadratic, this gives an approximately **4× peak-memory reduction** in the constant factor for large $n_i$, theoretically guaranteed even before applying any other optimization.
+So, the total space complexity per cluster is reduced from $O(2n_i^2+2n_i-1)$ to $O\left(\frac{n_i(n_i-1)}{2}+2n_i-1\right)$. Although both are quadratic, this gives an approximately **4X peak-memory reduction** in the constant factor for large $n_i$, theoretically guaranteed even before applying any other optimization.
 
 
 ## Our Contribution: DSPC (Density Separation of a Pair of Clusters)
@@ -158,6 +151,8 @@ This modification gives us the following benefits:
    When we know in advance that a same-cluster observation is not required downstream, we can short-circuit the iteration without ever performing the distance arithmetic.
    The worst-case upper bound for `(Step-1, Step-2)` combined remains the same, because we are performing the same task, just in a different order. However, in most cases, where a query point is surrounded by more same-cluster observations than outside-cluster observations, this reduces the average runtime.
 - **We no longer need to store `#cluster_core_size + 1` neighbors per query in an intermediate array**, only to discard all but one.
+
+---
 
 ## How to Use
 
@@ -192,7 +187,7 @@ Beyond the top-level `DBCV_score`, we've also built and exposed two standalone u
 from DBCV.utils import mst_linkage_core_condensed, cKDTree
 ```
 
-> **Note:** There is no free lunch. By adding an extra layer of index manipulation in the $O(n_i^2)$ hot loop of Prim's algorithm, our customized MST routine should run slower than a generic MST builder when considered in isolation.
+> **NOTE:** There is no free lunch. By adding an extra layer of index manipulation in the $O(n_i^2)$ hot loop of Prim's algorithm, our customized MST routine should run slower than a generic MST builder when considered in isolation.
 However, we have optimized the complete DBCV workflow tightly enough to absorb those extra seconds and achieve a net positive runtime improvement.
 
 
@@ -277,7 +272,7 @@ Score for each dataset, method, and run, across all sizes. **NA** marks a run th
 <!-- SCORE_TABLE:moons END -->
 
 
-## Conclusion
+## CONCLUSION
 
 - Our implementation and FelSiq scores match to the displayed precision in every run, at every size, and on every dataset. The residual (visible only beyond the 10th–12th decimal place and not shown here) is floating-point/compiler-level noise, not an algorithmic difference. However, this does not imply that HDBSCAN is incorrect. While the total weight of an MST is constant, different initialization or tie-breaking policies can lead to different edges being selected and, consequently, different DSC and DSPC values. The scores simply demonstrate that we have strictly **replicated the reference implementation's workflow** without any deviation. ✅
 
@@ -285,7 +280,7 @@ Score for each dataset, method, and run, across all sizes. **NA** marks a run th
 
 - Except for small samples, where implementation-specific fixed costs dominate, our implementation also outperforms the available alternatives in terms of peak memory demand. While the HDBSCAN implementation crashes a 32 GB system beyond 50K observations, our implementation completes smoothly at 100K observations with a peak memory demand of around ~10 GB. At large scales, our peak **memory usage remains at approximately 10%** of that of the HDBSCAN implementation. 📉
 
-> **Note:** We never need to materialize a distance matrix combining all clusters for DSPC, and only require the within-cluster condensed distance array for DSC. Hence, the peak memory demand grows with the size of the largest cluster, rather than with the total number of observations. For example, *(blobs10 data - 10 clusters; 50K samples)* and *(moons or circles data - 2 clusters; 10K samples)* exhibit roughly equal peak memory usage.
+> **NOTE:** We never need to materialize a distance matrix combining all clusters for DSPC, and only require the within-cluster condensed distance array for DSC. Hence, the peak memory demand grows with the size of the largest cluster, rather than with the total number of observations. For example, *(blobs10 data - 10 clusters; 50K samples)* and *(moons or circles data - 2 clusters; 10K samples)* exhibit roughly equal peak memory usage.
   
 ---
 
@@ -296,32 +291,32 @@ Score for each dataset, method, and run, across all sizes. **NA** marks a run th
 For a point $x$ in cluster $C_i$ (with $|C_i| = n_i$ points and $d$ features), the all-points core distance is:
 
 $$
-\text{APCD}(x) = \left( \frac{1}{n_i - 1} \sum_{\substack{y \in C_i \\ y \neq x}} \left( \|x - y\|^2 \right)^{-d} \right)^{-1/d}
+\text{APCD}(x) =
+\left(
+\frac{1}{n_i - 1}
+\sum_{\substack{y \in C_i \\ y \neq x}}
+\left( \|x-y\|^2 \right)^{-d}
+\right)^{-1/d}
 $$
 
 and the mutual-reachability distance between two points is:
 
 $$
-\text{MRD}(x, y) = \max\left( \|x - y\|^2,\ \text{APCD}(x),\ \text{APCD}(y) \right)
+\text{MRD}(x,y) =
+\max\left(
+\|x-y\|^2,\,
+\text{APCD}(x),\,
+\text{APCD}(y)
+\right)
 $$
 
-where $\|x-y\|^2$ is squared-Euclidean distance — the paper by Moulavi et al. (2014) specifies squared-Euclidean rather than ordinary Euclidean distance here, since it assigns proportionally greater weight to closer neighbors in the APCD sum.
+where $\|x-y\|^2$ is squared-Euclidean distance — the paper by Moulavi et al. (2014) specifies squared-Euclidean rather than ordinary Euclidean distance here, since it assigns greater weight to closer neighbors in the inverse-power sum.
 
-`float64` represents values from `4.94e-324` to `1.80e+308`. Since $\|x-y\|^2$ is raised to the power $-d$, both ends of that range are reachable long before $d$ gets large:
+`float64` represents values from the smallest positive subnormal `4.9406564584124654e-324` to the largest finite value `1.7976931348623157e+308`. Since $|x-y|^2$ is raised to the power $-d$, both ends of this range can be reached well before $d$ becomes large:
 
-**Case 1 — $\|x-y\|^2$ at or near exact zero.** $\left(\|x-y\|^2\right)^{-d}$ overflows to $+\infty$, so the sum inside the outer parentheses is dominated by that single $\infty$ term, and $\infty^{-1/d} = 0$. Two points with no practically meaningful distance between them collapse `APCD` to `0` for both — which is the intended behavior for duplicate (or near-duplicate) points, not a bug.
-
-Collapses to `0` once:
-
-| $d$ | $\|x-y\|^2 <$ |
-|---:|---:|
-| 50 | `3.42e-07` |
-| 25 | `1.17e-13` |
-| 10 | `4.67e-33` |
-
-**Case 2 — $\|x-y\|^2$ extremely large.** $\left(\|x-y\|^2\right)^{-d}$ underflows to exactly `0`. If *every* other point in the cluster is far enough from $x$ to trigger this, the entire sum underflows to `0`, and $0^{-1/d} = +\infty$ — `APCD(x)` becomes infinite for that point. This is the expected behavior for an extreme outlier, not a bug.
-
-Collapses to `+∞` once every neighbor satisfies:
+**`Case 1:`** $|x-y|^2$ is extremely large. $\left(|x-y|^2\right)^{-d}$ underflows to exactly zero. If every other point in the cluster is far enough from $x$ to trigger this, the entire sum underflows to 0, and $0^{-1/d} = +\infty$ i.e., APCD(x) becomes infinite; consequently, $\text{MRD}(x, y)$ is $\infty$ for any $y$ in that cluster. **When an extreme outlier exists, the MRD graph becomes disconnected** — we trace this behaviour and immediately terminate execution, as an MST is not defined for a disconnected graph.
+ 
+*Collapses to `+∞` once every neighbor satisfies:*
 
 | $d$ | $\|x-y\|^2 >$ |
 |---:|---:|
@@ -329,9 +324,23 @@ Collapses to `+∞` once every neighbor satisfies:
 | 25 | `2.14e+12` |
 | 10 | `6.69e+30` |
 
-(All six thresholds above are exact: the smallest positive `float64` subnormal is `4.9406564584124654e-324` and the largest finite `float64` is `1.7976931348623157e+308`; the table entries are $\left(4.9406564584124654 \times 10^{-324}\right)^{1/d}$ and $\left(1.7976931348623157 \times 10^{308}\right)^{1/d}$ respectively — re-derived and checked against the code's observed behavior, not copied from the source comment.)
 
-At $d = 50$, the collapse range starts at a squared distance of only `3.42e-07` — well within the range of ordinary, non-duplicate points on real data, meaning legitimate close-but-distinct neighbors risk being silently treated as duplicates. At $d = 25$, the range is narrow enough (`1.17e-13` to `2.14e+12`) to stay clear of typical data. This `float64` implementation is reliable up to roughly $d \le 25$. Beyond that, the same APCD accumulation logic would need reimplementing in `float128` (NumPy's extended-precision floating type) to push these collapse thresholds back out to a safe range.
+
+**`Case 2:`** $|x-y|^2$ is at or near exact zero. $\left(|x-y|^2\right)^{-d}$ overflows to $+\infty$, so the sum inside the outer parentheses is dominated by that single $\infty$ term, and $\infty^{-1/d} = 0$. **Two points with no practically meaningful distance between them collapse APCD to 0 for both** — which is the intended behavior for duplicate (or near-duplicate) points, not a bug.
+
+*Collapses to `0` once:*
+
+| $d$ | $\|x-y\|^2 <$ |
+|---:|---:|
+| 50 | `3.42e-07` |
+| 25 | `1.17e-13` |
+| 10 | `4.67e-33` |
+
+At $d = 50$, the collapse range starts at a squared distance of only `3.42e-07` — well within the range of ordinary, non-duplicate points on real data, meaning legitimate close-but-distinct neighbors risk being silently treated as duplicates. At $d = 10$, the range is narrow enough (`4.67e-33` to `6.69e+30`) to stay clear of any realistic data.
+
+**This `float64`-based implementation is hard-capped at $d \le 25$ as a guardrail.** Beyond that, the same APCD accumulation logic would need reimplementing in `float128` (NumPy's extended-precision floating type) to push these collapse thresholds back out to a safe range.
+
+> **NOTE:** Given that density-based clustering itself becomes questionable beyond roughly 5–10 dimensions due to the severe **curse of dimensionality**, our DBCV implementation should cover most practical requirements well.
 
 ---
 
