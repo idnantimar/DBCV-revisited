@@ -199,19 +199,19 @@ However, we have optimized the complete DBCV workflow tightly enough to absorb t
 
 ## Time & Memory
 
-*Wall-clock time and peak RSS, scaling from 500 to 100,000 points*
+*Wall-clock time and peak RSS, scaling from 500 to 100,000 observations:*
 
 ![Runtime and peak memory across dataset sizes, for blobs10, circles, and moons](assets/time-memory-combined.svg)
 
-The log-log view above is the right one for reading exact scaling behavior at every size. Keeping N on a log scale (so the smaller sizes stay readable) but switching the value axis to linear makes the gap even more visually stark — the other three methods shoot upward while ours stays pinned near zero across the same range:
+*Keeping N on a log scale (so the smaller sizes stay readable) but switching the value axis to linear makes the gap even more visually stark.*
 
 ![Runtime and peak memory across dataset sizes, linear scale](assets/time-memory-combined-linear.svg)
 
 ## Score
 
-*Agreement with felsiq's reference implementation*
+*Agreement with felsiq's reference implementation:*
 
-Score for each dataset, method, and run, across all sizes. `kdbcv` is excluded here — see [Available Options](#available-options) for the implementation issue we found and reported ([Issue #3](https://github.com/Kaufman-Lab-Columbia/k-DBCV/issues/3)); it remains in the [Time & Memory](#time--memory) benchmarks above since that issue doesn't affect runtime/memory measurement.
+Score for each dataset, method, and run, across all sizes. **NA** marks a run that did not finish at that size (timeout, out-of-memory, or crash) — same convention as the **✕** markers in [Time & Memory](#time--memory).
 
 ### blobs10
 
@@ -276,14 +276,17 @@ Score for each dataset, method, and run, across all sizes. `kdbcv` is excluded h
 </table>
 <!-- SCORE_TABLE:moons END -->
 
-*Ours and FelSiq match to the displayed precision in every run, at every size, on every dataset — the residual (visible only past the 10th–12th decimal, not shown here) is floating-point/compiler-level noise, not an algorithmic difference.*
-
-**NA** marks a run that did not finish at that size (timeout, out-of-memory, or crash) — same convention as the ✕ markers in [Time & Memory](#time--memory).
-
-These tables are generated directly from `summary/<dataset>/score.csv` by `generate_score_tables.py` — never hand-edited. To refresh after a new benchmark run, or to add/remove a method or dataset, edit the constants at the top of that script and re-run it; it rewrites only the content between each `SCORE_TABLE` marker pair above, leaving the rest of this file untouched.
 
 ## Conclusion
 
+- Our implementation and FelSiq scores match to the displayed precision in every run, at every size, and on every dataset. The residual (visible only beyond the 10th–12th decimal place and not shown here) is floating-point/compiler-level noise, not an algorithmic difference. However, this does not imply that HDBSCAN is incorrect. While the total weight of an MST is constant, different initialization or tie-breaking policies can lead to different edges being selected and, consequently, different DSC and DSPC values. The scores simply demonstrate that we have strictly **replicated the reference implementation's workflow** without any deviation. ✅
+
+- Our implementation consistently outperforms the available alternatives in runtime, achieving a **~20X+ speedup** over the HDBSCAN implementation. The other implementations perform even worse. 📈
+
+- Except for small samples, where implementation-specific fixed costs dominate, our implementation also outperforms the available alternatives in terms of peak memory demand. While the HDBSCAN implementation crashes a 32 GB system beyond 50K observations, our implementation completes smoothly at 100K observations with a peak memory demand of around ~10 GB. At large scales, our peak **memory usage remains at approximately 10%** of that of the HDBSCAN implementation. 📉
+
+> **Note:** We never need to materialize a distance matrix combining all clusters for DSPC, and only require the within-cluster condensed distance array for DSC. Hence, the peak memory demand grows with the size of the largest cluster, rather than with the total number of observations. For example, *(blobs10 data - 10 clusters; 50K samples)* and *(moons or circles data - 2 clusters; 10K samples)* exhibit roughly equal peak memory usage.
+  
 ---
 
 ## Appendix
