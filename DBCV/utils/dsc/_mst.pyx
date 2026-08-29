@@ -101,7 +101,7 @@ cpdef tuple mst_linkage_core_condensed(
         n_1, dtype=np.float64
     )
 
-    cdef np.ndarray[np.npy_bool, ndim=1] in_tree_arr = np.zeros(
+    cdef np.ndarray[np.npy_bool, ndim=1] not_in_tree_arr = np.ones(
         n, dtype=np.bool_
     )
     cdef np.ndarray[np.intp_t, ndim=1] current_sources_arr = np.empty(
@@ -115,7 +115,7 @@ cpdef tuple mst_linkage_core_condensed(
     cdef np.double_t *distance_ptr = <np.double_t *> dist_matrix_condensed.data
     cdef np.double_t *current_distances = <np.double_t *> current_distances_arr.data
     cdef np.intp_t *current_sources = <np.intp_t *> current_sources_arr.data
-    cdef np.npy_bool *in_tree = <np.npy_bool *> in_tree_arr.data
+    cdef np.npy_bool *not_in_tree = <np.npy_bool *> not_in_tree_arr.data
 
     cdef np.intp_t[:, ::1] nodes = nodes_arr
     cdef np.double_t *edges = <np.double_t *> edges_arr.data  
@@ -123,7 +123,7 @@ cpdef tuple mst_linkage_core_condensed(
     # k is place-holder for current node 
     # Initialize the algorithm with the very first observation being inside Tree
     cdef np.intp_t k = 0 # current_node
-    in_tree[k] = True
+    not_in_tree[k] = False
 
     cdef np.intp_t source_node, new_node, source_j
     cdef np.intp_t i, j, idx
@@ -149,7 +149,7 @@ cpdef tuple mst_linkage_core_condensed(
 
             # Case-1 : k > j ; available (j, current_node) in dist_matrix_condensed
             for j in range(k):
-                if not in_tree[j]: 
+                if not_in_tree[j]: 
                     d = distance_ptr[idx]
                     
                     dist_j = current_distances[j]
@@ -172,7 +172,7 @@ cpdef tuple mst_linkage_core_condensed(
 
             # Case-3 : k < j ; available (current_node, j) in dist_matrix_condensed
             for j in range(k + 1, n):
-                if not in_tree[j]:
+                if not_in_tree[j]:
                     d = distance_ptr[idx]
 
                     dist_j = current_distances[j]
@@ -195,6 +195,6 @@ cpdef tuple mst_linkage_core_condensed(
             edges[i - 1] = best_distance
 
             k = new_node
-            in_tree[k] = True
+            not_in_tree[k] = False
 
     return nodes_arr, edges_arr
