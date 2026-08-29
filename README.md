@@ -8,8 +8,8 @@
 
 - [Why DBCV?](#why-dbcv)
 - [Available Options](#available-options)
-- [Our Contribution: DSC](#our-contribution-dsc)
-- [Our Contribution: DSPC](#our-contribution-dspc)
+- [Our Contribution: DSC](#our-contribution-dsc-density-sparseness-of-a-cluster)
+- [Our Contribution: DSPC](#our-contribution-dspc-density-separation-of-a-pair-of-clusters)
 - [How to Use](#how-to-use)
 - [Time & Memory](#time--memory)
 - [Score](#score)
@@ -72,8 +72,6 @@ This makes DBCV particularly well suited to evaluating methods such as **HDBSCAN
 
 ## Available Options
 
-*hdbscan · kdbcv · felsiq — a brief survey*
-
 The time and space complexity of DBCV scales quadratically with the number of observations, which limits its adoption for large datasets.
 
 The available CRAN implementation, [`dbscan`](https://CRAN.R-project.org/package=dbscan), explicitly acknowledges this limitation in its documentation:
@@ -89,74 +87,77 @@ In Python, three notable implementations are:
 3. **[`k-DBCV`](https://github.com/Kaufman-Lab-Columbia/k-DBCV)**
    This implementation introduces a KD-tree-based spatial partitioning strategy in place of brute-force nearest-neighbor search. During our review, however, we identified an implementation inconsistency, which is documented in [Issue #3](https://github.com/Kaufman-Lab-Columbia/k-DBCV/issues/3) and was brought to the author's attention.
 
-## Our Contribution: DSC
+## Our Contribution: DSC (Density Sparseness of a Cluster)
 
-*Density Sparseness of a Cluster*
 
 The typical workflow for DSC is, for each cluster $i$:
 
-**Step 1:** Computes the Euclidean distance matrix
+**Step 1:** Computes the Euclidean distance matrix. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i^2)$
 
-**Step 2:** Computes the all-points-core-distance array
+**Step 2:** Computes the all-points-core-distance array. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i)$
 
-**Step 3:** Computes the mutual-reachability distance
+**Step 3:** Computes the mutual-reachability distance matrix. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i^2)$
 
-**Step 4:** Computes the minimum spanning tree
+**Step 4:** Computes the minimum spanning tree. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i-1)$
 
 We have made the following optimizations:
 
-**Step 1:**
-Computes only the upper-triangular block of the Euclidean distance matrix and stores it in a condensed array format (see SciPy's [`pdist`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.pdist.html)). The distance matrix is symmetric by definition, with zero-valued diagonals, so there is no reason to ever materialize the full matrix.
+**`Step 1:`**
+Computes only the upper-triangular block of the Euclidean distance matrix and stores it in a condensed array format (see SciPy's [`pdist`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.pdist.html)). The distance matrix is symmetric by definition, with zero-valued diagonals, so there is no reason to ever materialize the full matrix. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i(n_i-1)/2)$
 
-**Step 2:**
-Computes the all-points-core-distance array as is.
+**`Step 2:`**
+Computes the all-points-core-distance array as is. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i)$
 
-**Step 3:**
-The Euclidean and mutual-reachability distance matrices have exactly the same shape, and the argument about diagonal symmetry still holds. We update the allocation from Step 1 in place.
+**`Step 3:`**
+The Euclidean and mutual-reachability distance matrices have exactly the same shape, and the argument about diagonal symmetry still holds. We update the allocation from Step-1 in place. |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $0$
 
-**Step 4:**
+**`Step 4:`**
 Computes the minimum spanning tree. The available HDBSCAN implementations of Prim's algorithm only accept a full $n_i \times n_i$ distance matrix.
-So, we customized the algorithm from scratch to work directly with the condensed array from Step 3, without ever materializing it using [`squareform`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.squareform.html).
+So, we customized the algorithm from scratch to work directly with the condensed array from Step-3, without ever materializing it in full [`squareform`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.squareform.html). |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i-1)$
 
 ![DSC workflow: naive vs. our optimization](assets/dsc-workflow.svg)
 
-So, the total space complexity per cluster is reduced from $O(2n_i^2+2n_i-1)$ to $O(n_i(n_i-1)/2+2n_i-1)$. Although both are quadratic, this gives an approximately **4× peak-memory reduction** in the constant factor for large $n_i$, theoretically guaranteed even before applying any other optimization.
+So, the total space complexity per cluster is reduced:
 
-**Note:** There is no free lunch. By adding an extra layer of index manipulation in the $O(n_i^2)$ hot loop of Prim's algorithm, our customized MST routine should run slower than a generic MST builder when considered in isolation.
-However, we have optimized the complete DBCV workflow tightly enough to absorb those extra seconds and achieve a net positive runtime improvement.
+$$
+O(2n_i^2+2n_i-1)
+\longrightarrow
+O\left(\frac{n_i(n_i-1)}{2}+2n_i-1\right)
+$$
 
-## Our Contribution: DSPC
+Although both are quadratic, this gives an approximately **4× peak-memory reduction** in the constant factor for large $n_i$, theoretically guaranteed even before applying any other optimization.
 
-*Density Separation of a Pair of Clusters*
+
+## Our Contribution: DSPC (Density Separation of a Pair of Clusters)
 
 For DSPC, we adopt a KD-tree approach to avoid materializing cross-cluster matrices during the loop.
 
 The tree is built from the combined data of core points from all clusters, and we need to find the nearest neighbor of a point outside its own cluster.
 
-So, the typical workflow for cluster $i$ is:
+So, the typical workflow demonstrated in [k-DBCV](#available-options) for cluster $i$ is:
 
-**Step 1:** Find `#cluster_core_size + 1` neighbors for each point to ensure at least one outside-cluster neighbor.
+**`Step 1:`** Find `#cluster_core_size + 1` neighbors for each point to ensure at least one outside-cluster neighbor.
 
-**Step 2:** Discard the same-cluster neighbors and retain only the closest outside-cluster neighbor using index filtering; we already know which observation ID belongs to which cluster.
+**`Step 2:`** Discard the same-cluster neighbors and retain only the closest outside-cluster neighbor using index filtering; we already know which observation ID belongs to which cluster.
 
-Here, we patch the brute-force loop on the leaf nodes of the query routine to perform the index filtering **before** distance calculation. The internal-node tree traversal remains the same.
+Here, we patch the brute-force loop on the leaf nodes of the query routine to perform the index **filtering before distance calculation**. The internal-node tree traversal remains the same.
 
 ![DSPC workflow: filter-after vs. filter-first](assets/dspc-workflow.svg)
 
 This modification gives us the following benefits:
 
-1. **Index comparison is always cheaper than floating-point distance computation.**
+- **Index comparison is always cheaper than floating-point distance computation.**
    When we know in advance that a same-cluster observation is not required downstream, we can short-circuit the iteration without ever performing the distance arithmetic.
-   The worst-case upper bound for Step 1 + Step 2 remains the same, because we are performing the same task, just in a different order. However, in most cases, where a query point is surrounded by more same-cluster observations than outside-cluster observations, this reduces the average runtime.
-2. **We no longer need to store `#cluster_core_size + 1` neighbors per query in an intermediate array**, only to discard all but one.
+   The worst-case upper bound for `(Step-1, Step-2)` combined remains the same, because we are performing the same task, just in a different order. However, in most cases, where a query point is surrounded by more same-cluster observations than outside-cluster observations, this reduces the average runtime.
+- **We no longer need to store `#cluster_core_size + 1` neighbors per query in an intermediate array**, only to discard all but one.
 
 ## How to Use
 
@@ -166,7 +167,7 @@ cd DBCV-revisited
 pip install .
 ```
 
-Overall score only:
+**Overall score** only:
 
 ```python
 from sklearn.datasets import make_blobs
@@ -190,6 +191,11 @@ Beyond the top-level `DBCV_score`, we've also built and exposed two standalone u
 ```python
 from DBCV.utils import mst_linkage_core_condensed, cKDTree
 ```
+
+> **Note:** There is no free lunch. By adding an extra layer of index manipulation in the $O(n_i^2)$ hot loop of Prim's algorithm, our customized MST routine should run slower than a generic MST builder when considered in isolation.
+However, we have optimized the complete DBCV workflow tightly enough to absorb those extra seconds and achieve a net positive runtime improvement.
+
+
 
 ## Time & Memory
 
