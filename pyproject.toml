@@ -1,0 +1,26 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    "wheel",
+    "Cython>=3.0",
+    "numpy>=2.4.6",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbcv-revisited"
+version = "1.0.1"
+description = """Optimized implementation of Density-Based Clustering Validation (DBCV)"""
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.6",
+    "joblib>=1.5.3",
+]
+
+[tool.setuptools]
+packages = [
+    "DBCV",
+    "DBCV.utils",
+    "DBCV.utils.dsc",
+    "DBCV.utils.dspc",
+]
