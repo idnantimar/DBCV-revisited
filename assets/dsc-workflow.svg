@@ -120,7 +120,7 @@
     <circle cx="660" cy="590" r="18" fill="#F96167"/>
     <text x="660" y="596" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">4</text>
     <text x="692" y="588" font-size="17" font-weight="bold" fill="#1E2761">Minimum Spanning Tree</text>
-    <text x="692" y="610" font-size="13" fill="#5B6B8C">Custom Prim's — reads the condensed array directly, no squareform()</text>
+    <text x="692" y="610" font-size="13" fill="#5B6B8C">Custom Prim's — reads the condensed array directly, no squareform</text>
     <rect x="692" y="628" width="130" height="26" rx="13" fill="#FCE0DF"/>
     <text x="757" y="645" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, monospace" fill="#C13F44">O(nᵢ − 1)</text>
   </g>
