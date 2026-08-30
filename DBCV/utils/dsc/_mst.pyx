@@ -7,7 +7,7 @@ Copyright (c) 2015, Leland McInnes
 License: 3-clause BSD
 
 
-OUR CONTRIBUTION: @idnantimar
+OUR CONTRIBUTION: license: MIT Copyright (c) 2026 idnantimar
 -----------------
     [1.] A dense distance matrix consumes n * n memory.
         A condensed array consumes n * (n - 1) / 2 memory, by storing only the upper-triangular block.
