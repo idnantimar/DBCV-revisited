@@ -39,7 +39,10 @@ IDX_DTYPE = np.intp
 
 
 
-__all__ = ['DBCV_score']
+__all__ = [
+    'DBCV_score', 
+    'intracluster_analysis', 'intercluster_analysis',
+]
 
 
 def DBCV_score(
