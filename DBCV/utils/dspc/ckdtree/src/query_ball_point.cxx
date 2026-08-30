@@ -16,7 +16,7 @@ we can surely include the entire hyperbox without checking individual points wit
 Until we can decide Case-1 or Case-2, we keep splitting the box into smaller sub-boxes.
 
 
-OUR CONTRIBUTION @idnantimar
+OUR CONTRIBUTION license: MIT Copyright (c) 2026 idnantimar
 ----------------
     We introduce an additional exclude filter on Index during search traversal,
     rather than returning unfiltered results and performing post-processing.
