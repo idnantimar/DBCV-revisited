@@ -131,7 +131,7 @@ So, the total space complexity per cluster is reduced from $O(2n_i^2+2n_i-1)$ to
 
 ## Our Contribution: DSPC (Density Separation of a Pair of Clusters)
 
-For DSPC, we adopt a KD-tree approach to avoid materializing cross-cluster matrices during the loop.
+For DSPC, we adopt a KD-tree approach to avoid materializing cross-cluster matrices in a loop.
 
 The tree is built from the combined data of core points from all clusters, and we need to find the nearest neighbor of a point outside its own cluster.
 
@@ -157,6 +157,11 @@ This modification gives us the following benefits:
 ## How to Use
 
 ```bash
+pip install dbcv-revisited
+```
+Or,
+
+```bash
 git clone https://github.com/idnantimar/DBCV-revisited.git
 cd DBCV-revisited
 pip install .
@@ -177,6 +182,8 @@ With `per_cluster_scores=True`, you additionally get each cluster's own contribu
 ```python
 score, cluster_scores = DBCV_score(X, y, per_cluster_scores=True)
 ```
+
+There is a `n_jobs` parameter to enable **`joblib.Parallel(...)`-based multi-threading**; however, the default single-threaded execution is generally sufficient, and you may barely need `n_jobs` in practice.
 
 Beyond the top-level `DBCV_score`, we've also built and exposed two standalone utilities under `DBCV.utils`, usable independently of DBCV itself:
 
@@ -278,7 +285,7 @@ Score for each dataset, method, and run, across all sizes. **NA** marks a run th
 
 - Our implementation consistently outperforms the available alternatives in runtime, achieving a **~20X+ speedup** over the HDBSCAN implementation. The other implementations perform even worse. 📈
 
-- Except for small samples, where implementation-specific fixed costs dominate, our implementation also outperforms the available alternatives in terms of peak memory demand. While the HDBSCAN implementation crashes a 32 GB system beyond 50K observations, our implementation completes smoothly at 100K observations with a peak memory demand of around ~10 GB. At large scales, our peak **memory usage remains at approximately 10%** of that of the HDBSCAN implementation. 📉
+- Except for small samples, where implementation-specific fixed costs dominate, our implementation also outperforms the available alternatives in terms of peak memory demand. While the HDBSCAN implementation crashes a 32 GB system beyond 50K observations, our implementation runs smoothly at 100K observations with a peak memory demand of around ~10 GB. At large scales, our peak **memory usage remains at approximately 10%** of that of the HDBSCAN implementation. 📉
 
 > **NOTE:** We never need to materialize a distance matrix combining all clusters for DSPC, and only require the within-cluster condensed distance array for DSC. Hence, the peak memory demand grows with the size of the largest cluster, rather than with the total number of observations. For example, *(blobs10 data - 10 clusters; 50K samples)* and *(moons or circles data - 2 clusters; 10K samples)* exhibit roughly equal peak memory usage.
   
@@ -312,7 +319,7 @@ $$
 
 where $\|x-y\|^2$ is squared-Euclidean distance — the paper by Moulavi et al. (2014) specifies squared-Euclidean rather than ordinary Euclidean distance here, since it assigns greater weight to closer neighbors in the inverse-power sum.
 
-`float64` represents values from the smallest positive subnormal `4.9406564584124654e-324` to the largest finite value `1.7976931348623157e+308`. Since $|x-y|^2$ is raised to the power $-d$, both ends of this range can be reached well before $d$ becomes large:
+`float64` represents values from the smallest positive subnormal `4.9406564584124654e-324` to the largest finite value `1.7976931348623157e+308`. Since $|x-y|^2$ is raised to the power $-d$, both ends of this range can be reached well before $x$ or $y$ individually approaches the boundary:
 
 **`Case 1:`** $|x-y|^2$ is extremely large. $\left(|x-y|^2\right)^{-d}$ underflows to exactly zero. If every other point in the cluster is far enough from $x$ to trigger this, the entire sum underflows to 0, and $0^{-1/d} = +\infty$ i.e., APCD(x) becomes infinite; consequently, $\text{MRD}(x, y)$ is $\infty$ for any $y$ in that cluster. **When an extreme outlier exists, the MRD graph becomes disconnected** — we trace this behaviour and immediately terminate execution, as an MST is not defined for a disconnected graph.
  
@@ -340,7 +347,7 @@ At $d = 50$, the collapse range starts at a squared distance of only `3.42e-07` 
 
 **This `float64`-based implementation is hard-capped at $d \le 25$ as a guardrail.** Beyond that, the same APCD accumulation logic would need reimplementing in `float128` (NumPy's extended-precision floating type) to push these collapse thresholds back out to a safe range.
 
-> **NOTE:** Given that density-based clustering itself becomes questionable beyond roughly 5–10 dimensions due to the severe **curse of dimensionality**, our DBCV implementation should cover most practical requirements well.
+> **NOTE:** Given that density-based clustering itself becomes questionable beyond roughly 5–10 dimensions due to the severe **curse of dimensionality**, our DBCV implementation should already cover most practical requirements well.
 
 ---
 
