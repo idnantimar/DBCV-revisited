@@ -9,14 +9,14 @@ extensions = [
     Extension(
         "DBCV.utils.dsc._apcd_mrd",
         ["DBCV/utils/dsc/_apcd_mrd.pyx"],
-        extra_compile_args=["-O3", "-march=native"],
+        extra_compile_args=["-O3"],
     ),
 
     # NOTE: mst calculation is dominated by if-else; `-ffinite-math-only` not much beneficial here.
     Extension(
         "DBCV.utils.dsc._mst",
         ["DBCV/utils/dsc/_mst.pyx"],
-        extra_compile_args=["-O3", "-march=native"],
+        extra_compile_args=["-O3"],
     ),
 
     # NOTE: runtime contribution of dspc is <5% of total.
@@ -30,7 +30,7 @@ extensions = [
         ],
         include_dirs=["DBCV/utils/dspc/ckdtree/src"],
         language="c++",
-        extra_compile_args=["-O3", "-march=native", "-std=c++17"],
+        extra_compile_args=["-O3", "-std=c++17"],
     ),
 
 ]
