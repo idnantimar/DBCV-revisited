@@ -1,7 +1,7 @@
 '''
 Computes APCD & MRD in a single pairwise pass over input array.
 
-OUR CONTRIBUTION: @idnantimar
+OUR CONTRIBUTION: license: MIT Copyright (c) 2026 idnantimar
 -----------------
     [1.] Execute the whole routine in Scipy's `pdist(...)` style condensed form, without ever materializing `squareform(...)` format.
         Some Index manipulation is utilized to exploit distance-matrix symmetry.
