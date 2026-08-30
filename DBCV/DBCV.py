@@ -1,3 +1,9 @@
+## the project skeleton is adapted form k-DBCV Copyright (c) 2024 Kaufman Lab Columbia
+##
+## Our own improvisation achieves 20x+ speedup using ~10% peak memory
+## compared to available options in large data.
+## licence: MIT ; Copyright (c) 2026 idnantimar
+
 import numpy as np
 from joblib import Parallel, delayed
 
