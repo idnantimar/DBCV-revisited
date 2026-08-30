@@ -2,6 +2,9 @@
 
 #### ⚡ *A Memory-Efficient, High-Performance Implementation of Density-Based Cluster Validation*
 
+Provides **`20X+` speedup** consistently compared to other available options, while using less than **`one-quarter` of the peak memory** on moderate to large datasets.
+Also matches the score of the **MATLAB reference implementation** up to floating-point noise beyond `10 decimal` places.
+
 ---
 
 ## Table of Contents
