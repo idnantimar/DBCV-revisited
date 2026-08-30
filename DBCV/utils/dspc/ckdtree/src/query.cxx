@@ -13,7 +13,7 @@ If a hyperbox is farther away than already visited points from the query point,
 we can safely skip the hyperbox without checking individual points within it.
 
 
-OUR CONTRIBUTION @idnantimar
+OUR CONTRIBUTION license: MIT Copyright (c) 2026 idnantimar
 ----------------
     We introduce an additional exclude filter on Index during search traversal,
     rather than returning unfiltered results and performing post-processing.
