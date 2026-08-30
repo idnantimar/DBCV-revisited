@@ -7,7 +7,7 @@ Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers
 License: 3-clause BSD
 
 
-OUR CONTRIBUTION: @idnantimar
+OUR CONTRIBUTION: license: MIT Copyright (c) 2026 idnantimar
 -----------------
     Here we keep SciPy's implementation for tree building as far as possible
     (for future upstream consistency), then customize the query routines as per our requirements.
