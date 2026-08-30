@@ -1,7 +1,6 @@
 [build-system]
 requires = [
-    "setuptools>=61",
-    "wheel",
+    "setuptools>=77",
     "Cython>=3.0",
     "numpy>=2.4.6",
 ]
@@ -10,12 +9,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dbcv-revisited"
 version = "1.0.1"
-description = """Optimized implementation of Density-Based Clustering Validation (DBCV)"""
+description = "Optimized implementation of Density-Based Clustering Validation (DBCV)"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+
+authors = [
+    { name = "idnantimar" },
+]
+
 dependencies = [
     "numpy>=2.4.6",
     "joblib>=1.5.3",
 ]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/idnantimar/DBCV-revisited"
+Repository = "https://github.com/idnantimar/DBCV-revisited"
 
 [tool.setuptools]
 packages = [

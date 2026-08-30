@@ -1,0 +1,8 @@
+include LICENSE
+include README.md
+
+recursive-include DBCV/utils/dsc *.pyx
+recursive-include DBCV/utils/dspc *.pyx *.h *.cxx
+
+global-exclude *.c
+global-exclude *.cpp
