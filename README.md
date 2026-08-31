@@ -160,7 +160,7 @@ This modification gives us the following benefits:
 ## How to Use
 
 ```bash
-pip install dbcv-revisited
+pip install dbcv-revisit
 ```
 Or,
 
