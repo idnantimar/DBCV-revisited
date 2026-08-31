@@ -30,13 +30,6 @@ OUR CONTRIBUTION: license: MIT Copyright (c) 2026 idnantimar
 '''
 
 
-# distutils: define_macros=NPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: nonecheck=False
-# cython: initializedcheck=False
-
-
 import numpy as np
 cimport numpy as np
 

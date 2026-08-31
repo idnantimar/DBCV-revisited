@@ -16,16 +16,6 @@ OUR CONTRIBUTION: license: MIT Copyright (c) 2026 idnantimar
 '''
 
 
-# distutils: define_macros=NPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: nonecheck=False
-# cython: initializedcheck=False
-
-# cython: cdivision=True
-# cython: cpow=True
-
-
 import numpy as np
 cimport numpy as np
 
@@ -116,7 +106,7 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
             """
         )
 
-    cdef np.intp_t n_1 = n - 1
+    cdef np.double_t n1_inv = 1.0 / (n - 1)
     cdef np.double_t p = -1.0 / d
 
     # Initialize core distance = 0
@@ -130,7 +120,7 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
     cdef np.double_t *mrd = <np.double_t *> mrd_arr.data
 
     cdef np.intp_t i, j, k, idx
-    cdef np.double_t dist_sq, diff, w, mean_w
+    cdef np.double_t dist_sq, diff, w
     cdef np.intp_t bad_idx = -1
 
     cdef np.double_t *X_i
@@ -152,7 +142,7 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
                     dist_sq += diff * diff
 
                 # due to symmetry d(i, j) contributes to both APCD(i) & APCD(j)
-                w = 1.0 / int_pow(dist_sq, d)
+                w = n1_inv / int_pow(dist_sq, d) # avoid sum overflow for large n 
                 apcd[i] += w
                 apcd[j] += w
 
@@ -168,7 +158,7 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
         # ---------------------------------------------------------------------------------------
             #   [case-1] : dist_sq either exact zero or extremely close to zero 
             #
-            #       dist_sq**d = 0. --> w = inf --> (apcd / n_1) ** -1/d = 0.
+            #       dist_sq**d = 0. --> w = inf --> apcd ** -1/d = 0.
             #
             #       i.e. when two points have no practically meaningful distance,
             #       APCD collapses to zero for both of them.
@@ -180,7 +170,7 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
 
             #   [case-2] : dist_sq extremely large
             #
-            #       dist_sq**d = inf --> w = 0 --> (apcd / n_1) ** -1/d = inf
+            #       dist_sq**d = inf --> w = 0 --> apcd ** -1/d = inf
             #
             #       i.e. when there is an extreme outlier,
             #       APCD becomes infinity for that observation. 
@@ -192,9 +182,8 @@ cpdef tuple APCD_condensedMRD(np.ndarray[np.double_t, ndim=2] X):
 
         # Optimization: instead of validating O(n^2) loop, it is much cheaper to validate O(n) loop.
         for i in range(n):
-            mean_w = apcd[i] / n_1
-            if mean_w:
-                apcd[i] = (mean_w) ** p
+            if apcd[i]:
+                apcd[i] = (apcd[i]) ** p
             else:
                 bad_idx = i
                 break
