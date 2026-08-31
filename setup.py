@@ -10,6 +10,7 @@ extensions = [
         "DBCV.utils.dsc._apcd_mrd",
         ["DBCV/utils/dsc/_apcd_mrd.pyx"],
         extra_compile_args=["-O3"],
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     ),
 
     # NOTE: mst calculation is dominated by if-else; `-ffinite-math-only` not much beneficial here.
@@ -17,6 +18,7 @@ extensions = [
         "DBCV.utils.dsc._mst",
         ["DBCV/utils/dsc/_mst.pyx"],
         extra_compile_args=["-O3"],
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     ),
 
     # NOTE: runtime contribution of dspc is <5% of total.
@@ -31,6 +33,7 @@ extensions = [
         include_dirs=["DBCV/utils/dspc/ckdtree/src"],
         language="c++",
         extra_compile_args=["-O3", "-std=c++17"],
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     ),
 
 ]
@@ -41,6 +44,12 @@ setup(
         extensions,
         compiler_directives={
             "language_level": 3,
+            "boundscheck": False,
+            "wraparound": False,
+            "nonecheck": False,
+            "initializedcheck": False,
+            "cdivision": True,
+            "cpow": True,
         },
     ),
     include_dirs=[np.get_include()],
