@@ -127,7 +127,7 @@ Computes the minimum spanning tree. The available HDBSCAN implementations of Pri
 So, we customized the algorithm from scratch to work directly with the condensed array from Step-3, without ever materializing it in full [`squareform`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.squareform.html). |
 &nbsp;&nbsp;&nbsp;&nbsp;Incremental memory: $O(n_i-1)$
 
-![DSC workflow: naive vs. our optimization](assets/dsc-workflow.svg)
+![DSC workflow: naive vs. our optimization](https://raw.githubusercontent.com/idnantimar/DBCV-revisited/main/assets/dsc-workflow.svg)
 
 So, the total space complexity per cluster is reduced from $O(2n_i^2+2n_i-1)$ to $O\left(\frac{n_i(n_i-1)}{2}+2n_i-1\right)$. Although both are quadratic, this gives an approximately **4X peak-memory reduction** in the constant factor for large $n_i$, theoretically guaranteed even before applying any other optimization.
 
@@ -146,7 +146,7 @@ So, the typical workflow demonstrated in [k-DBCV](#available-options) for cluste
 
 Here, we patch the brute-force loop on the leaf nodes of the query routine to perform the index **filtering before distance calculation**. The internal-node tree traversal remains the same.
 
-![DSPC workflow: filter-after vs. filter-first](assets/dspc-workflow.svg)
+![DSPC workflow: filter-after vs. filter-first](https://raw.githubusercontent.com/idnantimar/DBCV-revisited/main/assets/dspc-workflow.svg)
 
 This modification gives us the following benefits:
 
@@ -206,11 +206,11 @@ However, we have optimized the complete DBCV workflow tightly enough to absorb t
 
 *Wall-clock time and peak RSS, scaling from 500 to 100,000 observations:*
 
-![Runtime and peak memory across dataset sizes, for blobs10, circles, and moons](assets/time-memory-combined.svg)
+![Runtime and peak memory across dataset sizes, for blobs10, circles, and moons](https://raw.githubusercontent.com/idnantimar/DBCV-revisited/main/assets/time-memory-combined.svg)
 
 *Keeping N on a log scale (so the smaller sizes stay readable) but switching the value axis to linear makes the gap even more visually stark.*
 
-![Runtime and peak memory across dataset sizes, linear scale](assets/time-memory-combined-linear.svg)
+![Runtime and peak memory across dataset sizes, linear scale](https://raw.githubusercontent.com/idnantimar/DBCV-revisited/main/assets/time-memory-combined-linear.svg)
 
 ## Score
 
